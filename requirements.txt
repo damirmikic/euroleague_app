@@ -4,3 +4,4 @@ google-generativeai
 matplotlib
 requests
 pyarrow
+tabulate
