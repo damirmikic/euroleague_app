@@ -53,7 +53,7 @@ def load_data(pbp_path, shots_path):
             
         return None
 
-    # Try loading PBP (Check uploaded -> local parquet -> local csv)
+    # Try loading PBP
     if pbp_path:
         pbp_df = read_file(pbp_path)
     elif os.path.exists("euroleague_pbp_2024_2025.parquet"):
@@ -61,7 +61,7 @@ def load_data(pbp_path, shots_path):
     elif os.path.exists("euroleague_pbp_2024_2025.csv"):
         pbp_df = pd.read_csv("euroleague_pbp_2024_2025.csv")
         
-    # Try loading Shots (Check uploaded -> local parquet -> local csv)
+    # Try loading Shots
     if shots_path:
         shots_df = read_file(shots_path)
     elif os.path.exists("euroleague_shot_chart_extended.parquet"):
@@ -71,53 +71,23 @@ def load_data(pbp_path, shots_path):
         
     return pbp_df, shots_df
 
-# Load data (either from upload or local default)
+# Load data
 df_pbp, df_shots = load_data(pbp_file, shots_file)
 
 # --- HELPER: DRAW COURT ---
 def draw_court(ax=None, color='black', lw=2):
-    """
-    Draws a FIBA Basketball Court.
-    Units: cm.
-    Hoop center: (0, 0).
-    """
     if ax is None:
         ax = plt.gca()
-
-    # The Hoop
     hoop = Circle((0, 0), radius=45/2, linewidth=lw, color=color, fill=False)
-
-    # Backboard
     backboard = Rectangle((-90, -120), 180, 1, linewidth=lw, color=color)
-
-    # The Paint (Key)
-    # Width: 490cm, Height (from baseline): 580cm
-    # Baseline is at y = -157.5 (1.575m behind hoop)
-    # Hoop is at 0,0. 
-    # So Paint Top is at 580 - 157.5 = 422.5
     outer_box = Rectangle((-245, -157.5), 490, 580, linewidth=lw, color=color, fill=False)
-    
-    # Restricted Area (Semi-circle)
     restricted = Arc((0, 0), 250, 250, theta1=0, theta2=180, linewidth=lw, color=color)
-
-    # Free Throw Circle
     top_free_throw = Arc((0, 422.5), 360, 360, theta1=0, theta2=180, linewidth=lw, color=color)
     bottom_free_throw = Arc((0, 422.5), 360, 360, theta1=180, theta2=360, linewidth=lw, color=color, linestyle='dashed')
-
-    # 3-Point Line
-    # Straight lines: 6.60m from baseline, 0.9m from sideline? 
-    # FIBA 3pt is 6.75m (675cm) radius from hoop.
-    # Corner straight lines are 299cm from center X (calculated)
-    corner_three_a = Rectangle((-750, -157.5), 0, 300, linewidth=lw, color=color) # Just a line logic
     three_arc = Arc((0, 0), 675*2, 675*2, theta1=22, theta2=158, linewidth=lw, color=color)
-    
-    # Center Circle (Half court is at Y = 1400 - 157.5 = 1242.5)
     center_outer_arc = Arc((0, 1242.5), 360, 360, theta1=180, theta2=360, linewidth=lw, color=color)
     center_inner_arc = Arc((0, 1242.5), 120, 120, theta1=180, theta2=360, linewidth=lw, color=color)
-
-    # Court Boundaries
     court = Rectangle((-750, -157.5), 1500, 1400, linewidth=lw, color=color, fill=False)
-
     ax.add_patch(court)
     ax.add_patch(hoop)
     ax.add_patch(backboard)
@@ -128,8 +98,6 @@ def draw_court(ax=None, color='black', lw=2):
     ax.add_patch(three_arc)
     ax.add_patch(center_outer_arc)
     ax.add_patch(center_inner_arc)
-
-    # Set limits
     ax.set_xlim(-800, 800)
     ax.set_ylim(-200, 1300)
     ax.set_aspect('equal')
@@ -142,63 +110,67 @@ tab1, tab2 = st.tabs(["🤖 AI Analyst", "🎯 Shot Charts"])
 # --- TAB 1: AI ANALYST ---
 with tab1:
     st.header("Ask the Data")
-    st.write("Examples: *'Who has the most blocks this season?'*, *'Calculate the 3-point percentage for Panathinaikos in Q4'*")
     
     if df_pbp is None:
         st.error("Play-by-Play Data not loaded. Please upload 'euroleague_pbp_2024_2025.csv'.")
     else:
-        # --- FILTERS SECTION ---
-        with st.expander("📊 Data Filters (Optional)", expanded=True):
+        # --- CASCADING FILTERS ---
+        with st.container():
+            st.subheader("📊 Data Filters")
             f_col1, f_col2, f_col3, f_col4 = st.columns(4)
             
-            # Initialize filtered df
-            df_filtered = df_pbp.copy()
-
             # 1. Season Filter
             with f_col1:
-                seasons = sorted(df_filtered['Season'].unique())
-                selected_season_pbp = st.selectbox("Season", ["All"] + list(seasons), key="pbp_season")
+                seasons = sorted(df_pbp['Season'].unique())
+                selected_season = st.selectbox("1. Season", ["All"] + list(seasons), key="pbp_season")
             
-            if selected_season_pbp != "All":
-                df_filtered = df_filtered[df_filtered['Season'] == selected_season_pbp]
+            # Filter data by Season
+            df_filtered = df_pbp.copy()
+            if selected_season != "All":
+                df_filtered = df_filtered[df_filtered['Season'] == selected_season]
 
-            # 2. Game Filter
+            # 2. Team Filter (Dependent on Season)
             with f_col2:
-                # Create readable labels for games
+                teams = sorted(df_filtered['TeamCode'].dropna().unique())
+                selected_team = st.selectbox("2. Team", ["All"] + teams, key="pbp_team")
+            
+            # Filter data by Team
+            if selected_team != "All":
+                df_filtered = df_filtered[df_filtered['TeamCode'] == selected_team]
+
+            # 3. Player Filter (Dependent on Season + Team)
+            with f_col3:
+                players = sorted(df_filtered['Player'].dropna().unique())
+                selected_player = st.selectbox("3. Player", ["All"] + players, key="pbp_player")
+            
+            # Filter data by Player
+            if selected_player != "All":
+                df_filtered = df_filtered[df_filtered['Player'] == selected_player]
+
+            # 4. Game Filter (Dependent on Season + Team + Player)
+            with f_col4:
                 if not df_filtered.empty:
+                    # Create readable labels: "15 - Real Madrid vs Barcelona"
                     games_df = df_filtered[['GameCode', 'TeamA', 'TeamB']].drop_duplicates().sort_values('GameCode')
                     games_df['Label'] = games_df['GameCode'].astype(str) + " - " + games_df['TeamA'] + " vs " + games_df['TeamB']
                     game_options = ["All"] + list(games_df['Label'])
                 else:
                     game_options = ["All"]
                 
-                selected_game_pbp = st.selectbox("Game", game_options, key="pbp_game")
+                selected_game = st.selectbox("4. Game", game_options, key="pbp_game")
 
-            if selected_game_pbp != "All":
-                game_code = int(selected_game_pbp.split(' - ')[0])
+            # Filter data by Game
+            if selected_game != "All":
+                game_code = int(selected_game.split(' - ')[0])
                 df_filtered = df_filtered[df_filtered['GameCode'] == game_code]
 
-            # 3. Team Filter
-            with f_col3:
-                # Use TeamCode for filtering as it represents the action performer
-                teams = sorted(df_filtered['TeamCode'].dropna().unique())
-                selected_team_pbp = st.selectbox("Team (Action)", ["All"] + teams, key="pbp_team")
-            
-            if selected_team_pbp != "All":
-                df_filtered = df_filtered[df_filtered['TeamCode'] == selected_team_pbp]
-
-            # 4. Player Filter
-            with f_col4:
-                players = sorted(df_filtered['Player'].dropna().unique())
-                selected_player_pbp = st.selectbox("Player", ["All"] + players, key="pbp_player")
-            
-            if selected_player_pbp != "All":
-                df_filtered = df_filtered[df_filtered['Player'] == selected_player_pbp]
-
-            st.caption(f"Analyzing **{len(df_filtered)}** rows of data.")
+            # --- DISPLAY FILTERED DATA ---
+            with st.expander(f"View Filtered Data ({len(df_filtered)} rows)", expanded=False):
+                st.dataframe(df_filtered, use_container_width=True)
 
         # --- QUERY SECTION ---
-        user_query = st.text_area("Enter your question:", height=100)
+        st.markdown("---")
+        user_query = st.text_area("Enter your question about the filtered data:", height=100, placeholder="e.g., How many points were scored in the 4th quarter?")
         
         if st.button("Analyze"):
             if not api_key:
@@ -208,7 +180,7 @@ with tab1:
             else:
                 with st.spinner("Gemini is thinking..."):
                     try:
-                        # 1. Construct Prompt with Filtered Context
+                        # Construct Prompt
                         buffer_info = df_filtered.head(1).to_markdown(index=False)
                         columns_info = list(df_filtered.columns)
                         
@@ -233,21 +205,21 @@ with tab1:
                         7. Use case-insensitive string comparison for names if needed.
                         """
                         
-                        # 2. Get Code from Gemini
+                        # Get Code
                         model = genai.GenerativeModel('gemini-2.0-flash-exp')
                         response = model.generate_content(prompt)
                         generated_code = response.text.replace("```python", "").replace("```", "").strip()
                         
-                        # 3. Execute Code safely using the FILTERED dataframe
+                        # Execute Code
                         local_vars = {"df": df_filtered, "pd": pd}
                         exec(generated_code, {}, local_vars)
                         
-                        # 4. Display Result
+                        # Display Result
                         result = local_vars.get("result")
                         
                         st.subheader("Result:")
                         if isinstance(result, pd.DataFrame):
-                            st.dataframe(result)
+                            st.dataframe(result, use_container_width=True)
                         else:
                             st.info(str(result))
                             
@@ -268,41 +240,40 @@ with tab2:
         # Filters
         col1, col2, col3, col4 = st.columns(4)
         
+        # 1. Season
         with col1:
             seasons = df_shots['Season'].unique()
-            selected_season = st.selectbox("Season", seasons, index=len(seasons)-1)
-            
-        # Filter df by season first to update other lists
-        df_season = df_shots[df_shots['Season'] == selected_season]
+            selected_season = st.selectbox("Season", seasons, index=len(seasons)-1, key="sc_season")
         
+        df_chart = df_shots[df_shots['Season'] == selected_season]
+        
+        # 2. Team
         with col2:
-            teams = sorted(df_season['Team'].unique())
-            selected_team = st.selectbox("Team", ["All"] + teams)
+            teams = sorted(df_chart['Team'].unique())
+            selected_team = st.selectbox("Team", ["All"] + teams, key="sc_team")
             
-        with col3:
-            if selected_team != "All":
-                players = sorted(df_season[df_season['Team'] == selected_team]['Player'].dropna().unique())
-            else:
-                players = sorted(df_season['Player'].dropna().unique())
-            selected_player = st.selectbox("Player", ["All"] + players)
-            
-        with col4:
-            # Optional Game Filter
-            games = sorted(df_season['GameCode'].unique())
-            selected_game = st.selectbox("Game Code (Optional)", ["All"] + [str(g) for g in games])
-
-        # Apply Filters
-        filtered_shots = df_season.copy()
         if selected_team != "All":
-            filtered_shots = filtered_shots[filtered_shots['Team'] == selected_team]
+            df_chart = df_chart[df_chart['Team'] == selected_team]
+            
+        # 3. Player
+        with col3:
+            players = sorted(df_chart['Player'].dropna().unique())
+            selected_player = st.selectbox("Player", ["All"] + players, key="sc_player")
+            
         if selected_player != "All":
-            filtered_shots = filtered_shots[filtered_shots['Player'] == selected_player]
+            df_chart = df_chart[df_chart['Player'] == selected_player]
+            
+        # 4. Game
+        with col4:
+            games = sorted(df_chart['GameCode'].unique())
+            selected_game = st.selectbox("Game Code", ["All"] + [str(g) for g in games], key="sc_game")
+
         if selected_game != "All":
-            filtered_shots = filtered_shots[filtered_shots['GameCode'] == int(selected_game)]
+            df_chart = df_chart[df_chart['GameCode'] == int(selected_game)]
 
         # Metrics
-        total_shots = len(filtered_shots)
-        made_shots = len(filtered_shots[filtered_shots['Shot_Result'] == 'Make'])
+        total_shots = len(df_chart)
+        made_shots = len(df_chart[df_chart['Shot_Result'] == 'Make'])
         percentage = (made_shots / total_shots * 100) if total_shots > 0 else 0
         
         st.metric(label="Field Goal %", value=f"{percentage:.1f}%", delta=f"{made_shots}/{total_shots}")
@@ -311,20 +282,17 @@ with tab2:
         fig, ax = plt.subplots(figsize=(12, 11))
         draw_court(ax, color="black")
         
-        # Plot Misses first (so Makes are on top)
-        misses = filtered_shots[filtered_shots['Shot_Result'] == 'Miss']
-        makes = filtered_shots[filtered_shots['Shot_Result'] == 'Make']
+        misses = df_chart[df_chart['Shot_Result'] == 'Miss']
+        makes = df_chart[df_chart['Shot_Result'] == 'Make']
         
         ax.scatter(misses['Coord_X'], misses['Coord_Y'], c='red', alpha=0.5, s=30, label='Miss', edgecolors='white', linewidth=0.5)
         ax.scatter(makes['Coord_X'], makes['Coord_Y'], c='green', alpha=0.8, s=30, label='Make', edgecolors='white', linewidth=0.5)
         
-        # Title and Legend
         title_str = f"{selected_season} | {selected_team} | {selected_player}"
         plt.title(title_str, fontsize=16)
         plt.legend(loc='upper right')
         
         st.pyplot(fig)
         
-        # Show Data Table
         with st.expander("View Shot Data"):
-            st.dataframe(filtered_shots)
+            st.dataframe(df_chart)
