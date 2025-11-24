@@ -39,13 +39,11 @@ def load_data(pbp_path, shots_path):
     
     # Helper: Load CSV or Parquet
     def read_file(file_path_or_buffer):
-        # Check if it's a Streamlit UploadedFile (has .name attribute)
         if hasattr(file_path_or_buffer, 'name'):
             if file_path_or_buffer.name.endswith('.parquet'):
                 return pd.read_parquet(file_path_or_buffer)
             return pd.read_csv(file_path_or_buffer)
         
-        # Check if it's a string path (local file)
         if isinstance(file_path_or_buffer, str):
             if file_path_or_buffer.endswith('.parquet'):
                 return pd.read_parquet(file_path_or_buffer)
@@ -53,7 +51,6 @@ def load_data(pbp_path, shots_path):
             
         return None
 
-    # Try loading PBP
     if pbp_path:
         pbp_df = read_file(pbp_path)
     elif os.path.exists("euroleague_pbp_2024_2025.parquet"):
@@ -61,7 +58,6 @@ def load_data(pbp_path, shots_path):
     elif os.path.exists("euroleague_pbp_2024_2025.csv"):
         pbp_df = pd.read_csv("euroleague_pbp_2024_2025.csv")
         
-    # Try loading Shots
     if shots_path:
         shots_df = read_file(shots_path)
     elif os.path.exists("euroleague_shot_chart_extended.parquet"):
@@ -71,8 +67,62 @@ def load_data(pbp_path, shots_path):
         
     return pbp_df, shots_df
 
-# Load data
 df_pbp, df_shots = load_data(pbp_file, shots_file)
+
+# --- HELPER: CALCULATE SUMMARY STATS ---
+def calculate_summary(df):
+    """Aggregates Play-by-Play data into a box score summary."""
+    if df.empty:
+        return pd.DataFrame()
+
+    # Create a copy to avoid SettingWithCopy warnings
+    stats = df.copy()
+    
+    # Map Points
+    stats['Points_Made'] = 0
+    stats.loc[stats['PlayType'] == 'FTM', 'Points_Made'] = 1
+    stats.loc[stats['PlayType'] == '2FGM', 'Points_Made'] = 2
+    stats.loc[stats['PlayType'] == '3FGM', 'Points_Made'] = 3
+
+    # Grouping keys: Always group by Game/Season/Teams. 
+    # If a single player is selected (filtered), their name will be constant, so it's fine.
+    group_cols = ['Season', 'GameCode', 'TeamA', 'TeamB']
+    
+    # Perform Aggregation
+    summary = stats.groupby(group_cols).agg(
+        PTS=('Points_Made', 'sum'),
+        P2M=('PlayType', lambda x: (x == '2FGM').sum()),
+        P2A=('PlayType', lambda x: (x.isin(['2FGM', '2FGA'])).sum()),
+        P3M=('PlayType', lambda x: (x == '3FGM').sum()),
+        P3A=('PlayType', lambda x: (x.isin(['3FGM', '3FGA'])).sum()),
+        FTM=('PlayType', lambda x: (x == 'FTM').sum()),
+        FTA=('PlayType', lambda x: (x.isin(['FTM', 'FTA'])).sum()),
+        REB=('PlayType', lambda x: (x.isin(['O', 'D'])).sum()),
+        AST=('PlayType', lambda x: (x == 'AS').sum()),
+        STL=('PlayType', lambda x: (x == 'ST').sum()),
+        BLK=('PlayType', lambda x: (x == 'FV').sum()),
+        TO=('PlayType', lambda x: (x == 'TO').sum()),
+        PF=('PlayType', lambda x: (x.isin(['CM', 'OF', 'U', 'T'])).sum()), # CM=Common, OF=Offensive, U=Unsportsmanlike, T=Technical
+        FD=('PlayType', lambda x: (x == 'RV').sum()) # RV = Foul Received/Drawn
+    ).reset_index()
+
+    # Calculate Percentages
+    summary['2P%'] = (summary['P2M'] / summary['P2A'] * 100).fillna(0).round(1).astype(str) + '%'
+    summary['3P%'] = (summary['P3M'] / summary['P3A'] * 100).fillna(0).round(1).astype(str) + '%'
+    summary['FT%'] = (summary['FTM'] / summary['FTA'] * 100).fillna(0).round(1).astype(str) + '%'
+
+    # Format output columns for readability
+    display_cols = [
+        'Season', 'GameCode', 'TeamA', 'TeamB', 
+        'PTS', '2P%', '3P%', 'FT%', 
+        'REB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD',
+        'P2M', 'P2A', 'P3M', 'P3A', 'FTM', 'FTA' # Detailed stats at the end
+    ]
+    
+    # Filter columns that exist
+    final_cols = [c for c in display_cols if c in summary.columns]
+    
+    return summary[final_cols].sort_values(['Season', 'GameCode'], ascending=[False, False])
 
 # --- HELPER: DRAW COURT ---
 def draw_court(ax=None, color='black', lw=2):
@@ -124,33 +174,29 @@ with tab1:
                 seasons = sorted(df_pbp['Season'].unique())
                 selected_season = st.selectbox("1. Season", ["All"] + list(seasons), key="pbp_season")
             
-            # Filter data by Season
             df_filtered = df_pbp.copy()
             if selected_season != "All":
                 df_filtered = df_filtered[df_filtered['Season'] == selected_season]
 
-            # 2. Team Filter (Dependent on Season)
+            # 2. Team Filter
             with f_col2:
                 teams = sorted(df_filtered['TeamCode'].dropna().unique())
                 selected_team = st.selectbox("2. Team", ["All"] + teams, key="pbp_team")
             
-            # Filter data by Team
             if selected_team != "All":
                 df_filtered = df_filtered[df_filtered['TeamCode'] == selected_team]
 
-            # 3. Player Filter (Dependent on Season + Team)
+            # 3. Player Filter
             with f_col3:
                 players = sorted(df_filtered['Player'].dropna().unique())
                 selected_player = st.selectbox("3. Player", ["All"] + players, key="pbp_player")
             
-            # Filter data by Player
             if selected_player != "All":
                 df_filtered = df_filtered[df_filtered['Player'] == selected_player]
 
-            # 4. Game Filter (Dependent on Season + Team + Player)
+            # 4. Game Filter
             with f_col4:
                 if not df_filtered.empty:
-                    # Create readable labels: "15 - Real Madrid vs Barcelona"
                     games_df = df_filtered[['GameCode', 'TeamA', 'TeamB']].drop_duplicates().sort_values('GameCode')
                     games_df['Label'] = games_df['GameCode'].astype(str) + " - " + games_df['TeamA'] + " vs " + games_df['TeamB']
                     game_options = ["All"] + list(games_df['Label'])
@@ -159,35 +205,42 @@ with tab1:
                 
                 selected_game = st.selectbox("4. Game", game_options, key="pbp_game")
 
-            # Filter data by Game
             if selected_game != "All":
                 game_code = int(selected_game.split(' - ')[0])
                 df_filtered = df_filtered[df_filtered['GameCode'] == game_code]
 
-            # --- DISPLAY FILTERED DATA ---
-            with st.expander(f"View Filtered Data ({len(df_filtered)} rows)", expanded=False):
+            # --- SUMMARY STATS DISPLAY ---
+            if not df_filtered.empty:
+                st.markdown("#### 📈 Filtered Summary per Match")
+                summary_df = calculate_summary(df_filtered)
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            else:
+                st.warning("No data matches the current filters.")
+
+            # --- RAW DATA PREVIEW ---
+            with st.expander(f"View Raw Play-by-Play Rows ({len(df_filtered)})", expanded=False):
                 st.dataframe(df_filtered, use_container_width=True)
 
         # --- QUERY SECTION ---
         st.markdown("---")
-        user_query = st.text_area("Enter your question about the filtered data:", height=100, placeholder="e.g., How many points were scored in the 4th quarter?")
+        user_query = st.text_area("Enter your question about this data:", height=100, placeholder="e.g., How many points did he score in the 4th quarter?")
         
         if st.button("Analyze"):
             if not api_key:
                 st.error("Please provide a Gemini API Key in the sidebar.")
             elif df_filtered.empty:
-                st.error("The filtered dataset is empty. Please adjust your filters.")
+                st.error("The filtered dataset is empty.")
             else:
                 with st.spinner("Gemini is thinking..."):
                     try:
-                        # Construct Prompt
+                        # Prompt
                         buffer_info = df_filtered.head(1).to_markdown(index=False)
                         columns_info = list(df_filtered.columns)
                         
                         prompt = f"""
                         You are a Python Data Analyst assistant. 
                         You have a Pandas DataFrame named `df` loaded with Euroleague basketball data.
-                        IMPORTANT: The user has already filtered this DataFrame. It only contains data relevant to their selection (Season/Game/Team/Player).
+                        IMPORTANT: The user has already filtered this DataFrame. It only contains data relevant to their selection.
                         
                         Here are the columns: {columns_info}
                         Here is a sample row:
@@ -201,20 +254,16 @@ with tab1:
                         3. `result` can be a number, a string, or a pandas DataFrame.
                         4. Do NOT use `print()`.
                         5. Return ONLY the Python code, no markdown formatting (no ```python).
-                        6. Handle potential division by zero if calculating percentages.
-                        7. Use case-insensitive string comparison for names if needed.
+                        6. Handle potential division by zero.
+                        7. Use case-insensitive string comparison for names.
                         """
                         
-                        # Get Code
                         model = genai.GenerativeModel('gemini-2.0-flash-exp')
                         response = model.generate_content(prompt)
                         generated_code = response.text.replace("```python", "").replace("```", "").strip()
                         
-                        # Execute Code
                         local_vars = {"df": df_filtered, "pd": pd}
                         exec(generated_code, {}, local_vars)
-                        
-                        # Display Result
                         result = local_vars.get("result")
                         
                         st.subheader("Result:")
@@ -228,26 +277,23 @@ with tab1:
                             
                     except Exception as e:
                         st.error(f"An error occurred: {e}")
-                        st.warning("Tip: If the error says a column is missing, check your filters or the data source.")
 
 # --- TAB 2: SHOT CHARTS ---
 with tab2:
     st.header("Interactive Shot Charts")
     
     if df_shots is None:
-        st.warning("Shot Chart Data not loaded. Please upload 'euroleague_shot_chart_extended.csv' or run the parser script.")
+        st.warning("Shot Chart Data not loaded.")
     else:
         # Filters
         col1, col2, col3, col4 = st.columns(4)
         
-        # 1. Season
         with col1:
             seasons = df_shots['Season'].unique()
             selected_season = st.selectbox("Season", seasons, index=len(seasons)-1, key="sc_season")
         
         df_chart = df_shots[df_shots['Season'] == selected_season]
         
-        # 2. Team
         with col2:
             teams = sorted(df_chart['Team'].unique())
             selected_team = st.selectbox("Team", ["All"] + teams, key="sc_team")
@@ -255,7 +301,6 @@ with tab2:
         if selected_team != "All":
             df_chart = df_chart[df_chart['Team'] == selected_team]
             
-        # 3. Player
         with col3:
             players = sorted(df_chart['Player'].dropna().unique())
             selected_player = st.selectbox("Player", ["All"] + players, key="sc_player")
@@ -263,7 +308,6 @@ with tab2:
         if selected_player != "All":
             df_chart = df_chart[df_chart['Player'] == selected_player]
             
-        # 4. Game
         with col4:
             games = sorted(df_chart['GameCode'].unique())
             selected_game = st.selectbox("Game Code", ["All"] + [str(g) for g in games], key="sc_game")
@@ -271,14 +315,12 @@ with tab2:
         if selected_game != "All":
             df_chart = df_chart[df_chart['GameCode'] == int(selected_game)]
 
-        # Metrics
         total_shots = len(df_chart)
         made_shots = len(df_chart[df_chart['Shot_Result'] == 'Make'])
         percentage = (made_shots / total_shots * 100) if total_shots > 0 else 0
         
         st.metric(label="Field Goal %", value=f"{percentage:.1f}%", delta=f"{made_shots}/{total_shots}")
 
-        # Plotting
         fig, ax = plt.subplots(figsize=(12, 11))
         draw_court(ax, color="black")
         
