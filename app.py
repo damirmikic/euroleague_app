@@ -28,8 +28,8 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### Data Sources")
-    pbp_file = st.file_uploader("Upload Play-by-Play CSV", type="csv")
-    shots_file = st.file_uploader("Upload Shot Chart CSV", type="csv")
+    pbp_file = st.file_uploader("Upload Play-by-Play Data", type=["csv", "parquet"])
+    shots_file = st.file_uploader("Upload Shot Chart Data", type=["csv", "parquet"])
 
 # --- DATA LOADING FUNCTIONS ---
 @st.cache_data
@@ -37,15 +37,35 @@ def load_data(pbp_path, shots_path):
     pbp_df = None
     shots_df = None
     
-    # Try loading PBP
+    # Helper: Load CSV or Parquet
+    def read_file(file_path_or_buffer):
+        # Check if it's a Streamlit UploadedFile (has .name attribute)
+        if hasattr(file_path_or_buffer, 'name'):
+            if file_path_or_buffer.name.endswith('.parquet'):
+                return pd.read_parquet(file_path_or_buffer)
+            return pd.read_csv(file_path_or_buffer)
+        
+        # Check if it's a string path (local file)
+        if isinstance(file_path_or_buffer, str):
+            if file_path_or_buffer.endswith('.parquet'):
+                return pd.read_parquet(file_path_or_buffer)
+            return pd.read_csv(file_path_or_buffer)
+            
+        return None
+
+    # Try loading PBP (Check uploaded -> local parquet -> local csv)
     if pbp_path:
-        pbp_df = pd.read_csv(pbp_path)
+        pbp_df = read_file(pbp_path)
+    elif os.path.exists("euroleague_pbp_2024_2025.parquet"):
+        pbp_df = pd.read_parquet("euroleague_pbp_2024_2025.parquet")
     elif os.path.exists("euroleague_pbp_2024_2025.csv"):
         pbp_df = pd.read_csv("euroleague_pbp_2024_2025.csv")
         
-    # Try loading Shots
+    # Try loading Shots (Check uploaded -> local parquet -> local csv)
     if shots_path:
-        shots_df = pd.read_csv(shots_path)
+        shots_df = read_file(shots_path)
+    elif os.path.exists("euroleague_shot_chart_extended.parquet"):
+        shots_df = pd.read_parquet("euroleague_shot_chart_extended.parquet")
     elif os.path.exists("euroleague_shot_chart_extended.csv"):
         shots_df = pd.read_csv("euroleague_shot_chart_extended.csv")
         
@@ -127,22 +147,75 @@ with tab1:
     if df_pbp is None:
         st.error("Play-by-Play Data not loaded. Please upload 'euroleague_pbp_2024_2025.csv'.")
     else:
-        user_query = st.text_area("Enter your question about the Play-by-Play data:")
+        # --- FILTERS SECTION ---
+        with st.expander("📊 Data Filters (Optional)", expanded=True):
+            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+            
+            # Initialize filtered df
+            df_filtered = df_pbp.copy()
+
+            # 1. Season Filter
+            with f_col1:
+                seasons = sorted(df_filtered['Season'].unique())
+                selected_season_pbp = st.selectbox("Season", ["All"] + list(seasons), key="pbp_season")
+            
+            if selected_season_pbp != "All":
+                df_filtered = df_filtered[df_filtered['Season'] == selected_season_pbp]
+
+            # 2. Game Filter
+            with f_col2:
+                # Create readable labels for games
+                if not df_filtered.empty:
+                    games_df = df_filtered[['GameCode', 'TeamA', 'TeamB']].drop_duplicates().sort_values('GameCode')
+                    games_df['Label'] = games_df['GameCode'].astype(str) + " - " + games_df['TeamA'] + " vs " + games_df['TeamB']
+                    game_options = ["All"] + list(games_df['Label'])
+                else:
+                    game_options = ["All"]
+                
+                selected_game_pbp = st.selectbox("Game", game_options, key="pbp_game")
+
+            if selected_game_pbp != "All":
+                game_code = int(selected_game_pbp.split(' - ')[0])
+                df_filtered = df_filtered[df_filtered['GameCode'] == game_code]
+
+            # 3. Team Filter
+            with f_col3:
+                # Use TeamCode for filtering as it represents the action performer
+                teams = sorted(df_filtered['TeamCode'].dropna().unique())
+                selected_team_pbp = st.selectbox("Team (Action)", ["All"] + teams, key="pbp_team")
+            
+            if selected_team_pbp != "All":
+                df_filtered = df_filtered[df_filtered['TeamCode'] == selected_team_pbp]
+
+            # 4. Player Filter
+            with f_col4:
+                players = sorted(df_filtered['Player'].dropna().unique())
+                selected_player_pbp = st.selectbox("Player", ["All"] + players, key="pbp_player")
+            
+            if selected_player_pbp != "All":
+                df_filtered = df_filtered[df_filtered['Player'] == selected_player_pbp]
+
+            st.caption(f"Analyzing **{len(df_filtered)}** rows of data.")
+
+        # --- QUERY SECTION ---
+        user_query = st.text_area("Enter your question:", height=100)
         
         if st.button("Analyze"):
             if not api_key:
                 st.error("Please provide a Gemini API Key in the sidebar.")
+            elif df_filtered.empty:
+                st.error("The filtered dataset is empty. Please adjust your filters.")
             else:
                 with st.spinner("Gemini is thinking..."):
                     try:
-                        # 1. Construct Prompt
-                        # We give Gemini the schema, not the whole data
-                        buffer_info = df_pbp.head(1).to_markdown(index=False)
-                        columns_info = list(df_pbp.columns)
+                        # 1. Construct Prompt with Filtered Context
+                        buffer_info = df_filtered.head(1).to_markdown(index=False)
+                        columns_info = list(df_filtered.columns)
                         
                         prompt = f"""
                         You are a Python Data Analyst assistant. 
                         You have a Pandas DataFrame named `df` loaded with Euroleague basketball data.
+                        IMPORTANT: The user has already filtered this DataFrame. It only contains data relevant to their selection (Season/Game/Team/Player).
                         
                         Here are the columns: {columns_info}
                         Here is a sample row:
@@ -151,13 +224,13 @@ with tab1:
                         Write a Python script to answer this question: "{user_query}"
                         
                         Rules:
-                        1. Assume `df` is already loaded.
+                        1. Assume `df` is already loaded (it is the filtered dataframe).
                         2. Store the final answer in a variable named `result`.
                         3. `result` can be a number, a string, or a pandas DataFrame.
                         4. Do NOT use `print()`.
                         5. Return ONLY the Python code, no markdown formatting (no ```python).
                         6. Handle potential division by zero if calculating percentages.
-                        7. If the user asks about specific players, use str.contains() case-insensitive for robustness.
+                        7. Use case-insensitive string comparison for names if needed.
                         """
                         
                         # 2. Get Code from Gemini
@@ -165,8 +238,8 @@ with tab1:
                         response = model.generate_content(prompt)
                         generated_code = response.text.replace("```python", "").replace("```", "").strip()
                         
-                        # 3. Execute Code safely
-                        local_vars = {"df": df_pbp, "pd": pd}
+                        # 3. Execute Code safely using the FILTERED dataframe
+                        local_vars = {"df": df_filtered, "pd": pd}
                         exec(generated_code, {}, local_vars)
                         
                         # 4. Display Result
@@ -183,7 +256,7 @@ with tab1:
                             
                     except Exception as e:
                         st.error(f"An error occurred: {e}")
-                        st.warning("Tip: Try to be more specific with column names (e.g., 'PlayType', 'Player', 'Quarter').")
+                        st.warning("Tip: If the error says a column is missing, check your filters or the data source.")
 
 # --- TAB 2: SHOT CHARTS ---
 with tab2:
