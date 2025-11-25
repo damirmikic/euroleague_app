@@ -2,8 +2,14 @@ import streamlit as st
 import pandas as pd
 import google.generativeai as genai
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle, Arc
 import os
+
+# Try importing SportyPy, handle error if missing
+try:
+    from sportypy.surfaces.basketball import FIBACourt
+    SPORTYPY_AVAILABLE = True
+except ImportError:
+    SPORTYPY_AVAILABLE = False
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -69,26 +75,81 @@ def load_data(pbp_path, shots_path):
 
 df_pbp, df_shots = load_data(pbp_file, shots_file)
 
+# --- HELPER: TIME TO SECONDS ---
+def time_to_seconds(t_str):
+    """Converts MM:SS string to seconds."""
+    if pd.isna(t_str): return 0
+    try:
+        m, s = map(int, str(t_str).split(':'))
+        return m * 60 + s
+    except:
+        return 0
+
+# --- HELPER: CALCULATE MINUTES ---
+def calculate_minutes_per_game(df):
+    """
+    Calculates minutes played per game/season based on IN/OUT markers.
+    Returns a Series indexed by (Season, GameCode, TeamA, TeamB).
+    """
+    def process_game(group):
+        total_seconds = 0
+        for quarter, q_data in group.groupby('Quarter'):
+            q_duration = 300 if quarter in ['OT', 'E1', 'E2'] else 600
+            
+            q_data = q_data.copy()
+            q_data['Seconds_Left'] = q_data['Time'].apply(time_to_seconds)
+            q_data = q_data.sort_values('Seconds_Left', ascending=False)
+            
+            subs = q_data[q_data['PlayType'].isin(['IN', 'OUT'])]
+            
+            is_on_court = False
+            last_switch = q_duration
+            
+            if len(subs) == 0:
+                if len(q_data) > 0:
+                    is_on_court = True 
+                else:
+                    is_on_court = False
+            else:
+                first_sub = subs.iloc[0]
+                if first_sub['PlayType'] == 'OUT':
+                    is_on_court = True
+                else:
+                    is_on_court = False
+            
+            for _, row in subs.iterrows():
+                t = row['Seconds_Left']
+                if row['PlayType'] == 'OUT':
+                    if is_on_court:
+                        total_seconds += (last_switch - t)
+                        is_on_court = False
+                    last_switch = t
+                elif row['PlayType'] == 'IN':
+                    if not is_on_court:
+                        last_switch = t
+                        is_on_court = True
+            
+            if is_on_court:
+                total_seconds += last_switch
+                
+        return round(total_seconds / 60.0, 2)
+
+    return df.groupby(['Season', 'GameCode', 'TeamA', 'TeamB']).apply(process_game)
+
 # --- HELPER: CALCULATE SUMMARY STATS ---
-def calculate_summary(df):
+def calculate_summary(df, is_player_view=False):
     """Aggregates Play-by-Play data into a box score summary."""
     if df.empty:
         return pd.DataFrame()
 
-    # Create a copy to avoid SettingWithCopy warnings
     stats = df.copy()
-    
-    # Map Points
     stats['Points_Made'] = 0
     stats.loc[stats['PlayType'] == 'FTM', 'Points_Made'] = 1
     stats.loc[stats['PlayType'] == '2FGM', 'Points_Made'] = 2
     stats.loc[stats['PlayType'] == '3FGM', 'Points_Made'] = 3
 
-    # Grouping keys: Always group by Game/Season/Teams. 
-    # If a single player is selected (filtered), their name will be constant, so it's fine.
     group_cols = ['Season', 'GameCode', 'TeamA', 'TeamB']
     
-    # Perform Aggregation
     summary = stats.groupby(group_cols).agg(
         PTS=('Points_Made', 'sum'),
         P2M=('PlayType', lambda x: (x == '2FGM').sum()),
@@ -97,62 +158,40 @@ def calculate_summary(df):
         P3A=('PlayType', lambda x: (x.isin(['3FGM', '3FGA'])).sum()),
         FTM=('PlayType', lambda x: (x == 'FTM').sum()),
         FTA=('PlayType', lambda x: (x.isin(['FTM', 'FTA'])).sum()),
+        OREB=('PlayType', lambda x: (x == 'O').sum()),
+        DREB=('PlayType', lambda x: (x == 'D').sum()),
         REB=('PlayType', lambda x: (x.isin(['O', 'D'])).sum()),
         AST=('PlayType', lambda x: (x == 'AS').sum()),
         STL=('PlayType', lambda x: (x == 'ST').sum()),
         BLK=('PlayType', lambda x: (x == 'FV').sum()),
         TO=('PlayType', lambda x: (x == 'TO').sum()),
-        PF=('PlayType', lambda x: (x.isin(['CM', 'OF', 'U', 'T'])).sum()), # CM=Common, OF=Offensive, U=Unsportsmanlike, T=Technical
-        FD=('PlayType', lambda x: (x == 'RV').sum()) # RV = Foul Received/Drawn
+        PF=('PlayType', lambda x: (x.isin(['CM', 'OF', 'U', 'T'])).sum()),
+        FD=('PlayType', lambda x: (x == 'RV').sum())
     ).reset_index()
 
-    # Calculate Percentages
+    if is_player_view:
+        mins = calculate_minutes_per_game(stats)
+        mins.name = "MIN"
+        summary = summary.set_index(group_cols).join(mins).reset_index()
+    else:
+        summary['MIN'] = 40.0
+
+    summary['FGA'] = summary['P2A'] + summary['P3A']
+    summary['POSS'] = (summary['FGA'] + 0.44 * summary['FTA'] + summary['TO'] - summary['OREB']).round(1)
+
     summary['2P%'] = (summary['P2M'] / summary['P2A'] * 100).fillna(0).round(1).astype(str) + '%'
     summary['3P%'] = (summary['P3M'] / summary['P3A'] * 100).fillna(0).round(1).astype(str) + '%'
     summary['FT%'] = (summary['FTM'] / summary['FTA'] * 100).fillna(0).round(1).astype(str) + '%'
 
-    # Format output columns for readability
     display_cols = [
-        'Season', 'GameCode', 'TeamA', 'TeamB', 
-        'PTS', '2P%', '3P%', 'FT%', 
-        'REB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD',
-        'P2M', 'P2A', 'P3M', 'P3A', 'FTM', 'FTA' # Detailed stats at the end
+        'Season', 'GameCode', 'TeamA', 'TeamB', 'MIN',
+        'PTS', 'POSS', '2P%', '3P%', 'FT%', 
+        'REB', 'OREB', 'DREB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD',
+        'P2M', 'P2A', 'P3M', 'P3A', 'FTM', 'FTA'
     ]
     
-    # Filter columns that exist
     final_cols = [c for c in display_cols if c in summary.columns]
-    
     return summary[final_cols].sort_values(['Season', 'GameCode'], ascending=[False, False])
-
-# --- HELPER: DRAW COURT ---
-def draw_court(ax=None, color='black', lw=2):
-    if ax is None:
-        ax = plt.gca()
-    hoop = Circle((0, 0), radius=45/2, linewidth=lw, color=color, fill=False)
-    backboard = Rectangle((-90, -120), 180, 1, linewidth=lw, color=color)
-    outer_box = Rectangle((-245, -157.5), 490, 580, linewidth=lw, color=color, fill=False)
-    restricted = Arc((0, 0), 250, 250, theta1=0, theta2=180, linewidth=lw, color=color)
-    top_free_throw = Arc((0, 422.5), 360, 360, theta1=0, theta2=180, linewidth=lw, color=color)
-    bottom_free_throw = Arc((0, 422.5), 360, 360, theta1=180, theta2=360, linewidth=lw, color=color, linestyle='dashed')
-    three_arc = Arc((0, 0), 675*2, 675*2, theta1=22, theta2=158, linewidth=lw, color=color)
-    center_outer_arc = Arc((0, 1242.5), 360, 360, theta1=180, theta2=360, linewidth=lw, color=color)
-    center_inner_arc = Arc((0, 1242.5), 120, 120, theta1=180, theta2=360, linewidth=lw, color=color)
-    court = Rectangle((-750, -157.5), 1500, 1400, linewidth=lw, color=color, fill=False)
-    ax.add_patch(court)
-    ax.add_patch(hoop)
-    ax.add_patch(backboard)
-    ax.add_patch(outer_box)
-    ax.add_patch(restricted)
-    ax.add_patch(top_free_throw)
-    ax.add_patch(bottom_free_throw)
-    ax.add_patch(three_arc)
-    ax.add_patch(center_outer_arc)
-    ax.add_patch(center_inner_arc)
-    ax.set_xlim(-800, 800)
-    ax.set_ylim(-200, 1300)
-    ax.set_aspect('equal')
-    ax.axis('off')
-    return ax
 
 # --- TAB LAYOUT ---
 tab1, tab2 = st.tabs(["🤖 AI Analyst", "🎯 Shot Charts"])
@@ -164,12 +203,10 @@ with tab1:
     if df_pbp is None:
         st.error("Play-by-Play Data not loaded. Please upload 'euroleague_pbp_2024_2025.csv'.")
     else:
-        # --- CASCADING FILTERS ---
         with st.container():
             st.subheader("📊 Data Filters")
             f_col1, f_col2, f_col3, f_col4 = st.columns(4)
             
-            # 1. Season Filter
             with f_col1:
                 seasons = sorted(df_pbp['Season'].unique())
                 selected_season = st.selectbox("1. Season", ["All"] + list(seasons), key="pbp_season")
@@ -178,7 +215,6 @@ with tab1:
             if selected_season != "All":
                 df_filtered = df_filtered[df_filtered['Season'] == selected_season]
 
-            # 2. Team Filter
             with f_col2:
                 teams = sorted(df_filtered['TeamCode'].dropna().unique())
                 selected_team = st.selectbox("2. Team", ["All"] + teams, key="pbp_team")
@@ -186,7 +222,6 @@ with tab1:
             if selected_team != "All":
                 df_filtered = df_filtered[df_filtered['TeamCode'] == selected_team]
 
-            # 3. Player Filter
             with f_col3:
                 players = sorted(df_filtered['Player'].dropna().unique())
                 selected_player = st.selectbox("3. Player", ["All"] + players, key="pbp_player")
@@ -194,7 +229,6 @@ with tab1:
             if selected_player != "All":
                 df_filtered = df_filtered[df_filtered['Player'] == selected_player]
 
-            # 4. Game Filter
             with f_col4:
                 if not df_filtered.empty:
                     games_df = df_filtered[['GameCode', 'TeamA', 'TeamB']].drop_duplicates().sort_values('GameCode')
@@ -209,19 +243,30 @@ with tab1:
                 game_code = int(selected_game.split(' - ')[0])
                 df_filtered = df_filtered[df_filtered['GameCode'] == game_code]
 
-            # --- SUMMARY STATS DISPLAY ---
             if not df_filtered.empty:
-                st.markdown("#### 📈 Filtered Summary per Match")
-                summary_df = calculate_summary(df_filtered)
+                is_player_view = selected_player != "All"
+                summary_df = calculate_summary(df_filtered, is_player_view)
+                
+                st.markdown("#### 📈 Match Summary")
                 st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                
+                if len(summary_df) > 1:
+                    st.markdown("#### 📊 Statistical Aggregates (Filtered Matches)")
+                    agg_cols = ['MIN', 'PTS', 'POSS', 'REB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD']
+                    agg_cols = [c for c in agg_cols if c in summary_df.columns]
+                    
+                    desc = summary_df[agg_cols].describe().T
+                    desc = desc[['mean', '50%', 'std', 'min', 'max']]
+                    desc.columns = ['Average', 'Median', 'Std Dev', 'Min', 'Max']
+                    
+                    st.dataframe(desc.style.format("{:.2f}"), use_container_width=True)
+                    
             else:
                 st.warning("No data matches the current filters.")
 
-            # --- RAW DATA PREVIEW ---
             with st.expander(f"View Raw Play-by-Play Rows ({len(df_filtered)})", expanded=False):
                 st.dataframe(df_filtered, use_container_width=True)
 
-        # --- QUERY SECTION ---
         st.markdown("---")
         user_query = st.text_area("Enter your question about this data:", height=100, placeholder="e.g., How many points did he score in the 4th quarter?")
         
@@ -233,7 +278,6 @@ with tab1:
             else:
                 with st.spinner("Gemini is thinking..."):
                     try:
-                        # Prompt
                         buffer_info = df_filtered.head(1).to_markdown(index=False)
                         columns_info = list(df_filtered.columns)
                         
@@ -321,20 +365,39 @@ with tab2:
         
         st.metric(label="Field Goal %", value=f"{percentage:.1f}%", delta=f"{made_shots}/{total_shots}")
 
-        fig, ax = plt.subplots(figsize=(12, 11))
-        draw_court(ax, color="black")
-        
-        misses = df_chart[df_chart['Shot_Result'] == 'Miss']
-        makes = df_chart[df_chart['Shot_Result'] == 'Make']
-        
-        ax.scatter(misses['Coord_X'], misses['Coord_Y'], c='red', alpha=0.5, s=30, label='Miss', edgecolors='white', linewidth=0.5)
-        ax.scatter(makes['Coord_X'], makes['Coord_Y'], c='green', alpha=0.8, s=30, label='Make', edgecolors='white', linewidth=0.5)
-        
-        title_str = f"{selected_season} | {selected_team} | {selected_player}"
-        plt.title(title_str, fontsize=16)
-        plt.legend(loc='upper right')
-        
-        st.pyplot(fig)
+        # --- DRAW COURT USING SPORTYPY ---
+        if not SPORTYPY_AVAILABLE:
+            st.error("SportyPy library not found. Please add 'sportypy' to requirements.txt.")
+        else:
+            # 1. Initialize Court (Vertical orientation for Portrait data)
+            court = FIBACourt(rotation=90) 
+            fig, ax = court.draw(figsize=(12, 12))
+            
+            # 2. Convert Units to Meters (cm -> m)
+            # Euroleague data is cm. SportyPy uses meters.
+            x_meters = df_chart['Coord_X'] / 100
+            y_meters = df_chart['Coord_Y'] / 100
+            
+            # 3. Plotting Logic
+            misses_mask = df_chart['Shot_Result'] == 'Miss'
+            makes_mask = df_chart['Shot_Result'] == 'Make'
+            
+            # No coordinate rotation needed because we rotated the court to 90 degrees
+            # to match the data's portrait orientation.
+            
+            # Plot Misses
+            ax.scatter(x_meters[misses_mask], y_meters[misses_mask], 
+                       c='red', alpha=0.5, s=40, label='Miss', edgecolors='white', linewidth=0.5, zorder=2)
+            
+            # Plot Makes
+            ax.scatter(x_meters[makes_mask], y_meters[makes_mask], 
+                       c='green', alpha=0.8, s=40, label='Make', edgecolors='white', linewidth=0.5, zorder=3)
+            
+            title_str = f"{selected_season} | {selected_team} | {selected_player}"
+            ax.set_title(title_str, fontsize=16, y=1.02)
+            ax.legend(loc='upper right')
+            
+            st.pyplot(fig)
         
         with st.expander("View Shot Data"):
             st.dataframe(df_chart)
