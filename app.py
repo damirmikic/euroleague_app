@@ -193,6 +193,10 @@ def calculate_summary(df, is_player_view=False):
     final_cols = [c for c in display_cols if c in summary.columns]
     return summary[final_cols].sort_values(['Season', 'GameCode'], ascending=[False, False])
 
+# --- HELPER: DRAW COURT ---
+# Deprecated custom function replaced by SportyPy in the main logic below
+# Keeping structure for reference if needed, but main app uses SportyPy now
+
 # --- TAB LAYOUT ---
 tab1, tab2 = st.tabs(["🤖 AI Analyst", "🎯 Shot Charts"])
 
@@ -370,8 +374,11 @@ with tab2:
             st.error("SportyPy library not found. Please add 'sportypy' to requirements.txt.")
         else:
             # 1. Initialize Court (Vertical orientation for Portrait data)
+            # Use standard matplotlib figure creation first
+            fig, ax = plt.subplots(figsize=(12, 12))
+            
             court = FIBACourt(rotation=90) 
-            fig, ax = court.draw(figsize=(12, 12))
+            court.draw(ax=ax)
             
             # 2. Convert Units to Meters (cm -> m)
             # Euroleague data is cm. SportyPy uses meters.
@@ -381,9 +388,6 @@ with tab2:
             # 3. Plotting Logic
             misses_mask = df_chart['Shot_Result'] == 'Miss'
             makes_mask = df_chart['Shot_Result'] == 'Make'
-            
-            # No coordinate rotation needed because we rotated the court to 90 degrees
-            # to match the data's portrait orientation.
             
             # Plot Misses
             ax.scatter(x_meters[misses_mask], y_meters[misses_mask], 
