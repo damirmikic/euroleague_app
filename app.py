@@ -2,7 +2,11 @@ import streamlit as st
 import pandas as pd
 import google.generativeai as genai
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle, Rectangle, Arc
 import os
+import requests
+import time
+import json
 
 # Try importing SportyPy, handle error if missing
 try:
@@ -17,6 +21,180 @@ st.set_page_config(
     page_icon="🏀",
     layout="wide"
 )
+
+# --- API CONFIGURATION ---
+API_BASE_URL = "https://live.euroleague.net/api"
+SEASONS_TO_FETCH = ["E2024", "E2025"]
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Accept": "application/json"
+}
+
+# --- SCRAPING FUNCTIONS ---
+def fetch_pbp_game(season, game_code):
+    """Fetches and parses PBP data for a single game."""
+    url = f"{API_BASE_URL}/PlaybyPlay?gamecode={game_code}&seasoncode={season}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=5)
+        if resp.status_code != 200: return None
+        data = resp.json()
+        if not data.get('TeamA'): return None # Game doesn't exist yet
+
+        # Parse Quarters
+        all_plays = []
+        quarters = [("Q1", "FirstQuarter"), ("Q2", "SecondQuarter"), 
+                    ("Q3", "ThirdQuarter"), ("Q4", "ForthQuarter"), ("OT", "ExtraTime")]
+        
+        base_info = {
+            "Season": season, "GameCode": game_code,
+            "TeamA": data.get('TeamA'), "TeamB": data.get('TeamB'),
+            "CodeTeamA": data.get('CodeTeamA', '').strip(), 
+            "CodeTeamB": data.get('CodeTeamB', '').strip()
+        }
+
+        for q_label, q_key in quarters:
+            if q_key in data and data[q_key]:
+                for play in data[q_key]:
+                    row = base_info.copy()
+                    row.update({
+                        "Quarter": q_label,
+                        "Minute": play.get("MINUTE"),
+                        "Time": play.get("MARKERTIME"),
+                        "TeamCode": play.get("CODETEAM", "").strip(),
+                        "Player_ID": play.get("PLAYER_ID", "").strip(),
+                        "Player": play.get("PLAYER"),
+                        "PlayType": play.get("PLAYTYPE"),
+                        "Points_A": play.get("POINTS_A"),
+                        "Points_B": play.get("POINTS_B"),
+                        "Info": play.get("PLAYINFO")
+                    })
+                    all_plays.append(row)
+        return all_plays
+    except:
+        return None
+
+def fetch_shot_game(season, game_code):
+    """Fetches and parses Shot/Points data for a single game."""
+    url = f"{API_BASE_URL}/Points?gamecode={game_code}&seasoncode={season}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=5)
+        if resp.status_code != 200: return None
+        data = resp.json()
+        if not data.get('Rows'): return None
+
+        all_shots = []
+        for shot in data['Rows']:
+            action_id = shot.get("ID_ACTION", "")
+            
+            # Logic
+            shot_result = "Make" if action_id.endswith("M") else "Miss" if (action_id.endswith("A") or action_id.endswith("MISS")) else "Unknown"
+            if "FT" in action_id: continue # Optional: Skip free throws for pure shot chart? Keeping for now.
+
+            # Coords
+            try: cx, cy = float(shot.get("COORD_X")), float(shot.get("COORD_Y"))
+            except: cx, cy = None, None
+
+            is_dunk = "Dunk" in shot.get("ACTION", "")
+            is_half = (cy is not None and cy > 1242)
+
+            row = {
+                "Season": season, "GameCode": game_code,
+                "Team": shot.get("TEAM", "").strip(),
+                "Player": shot.get("PLAYER"),
+                "Action_Type": action_id,
+                "Shot_Result": shot_result,
+                "Points": shot.get("POINTS"),
+                "Coord_X": cx, "Coord_Y": cy,
+                "Zone": shot.get("ZONE"),
+                "Minute": shot.get("MINUTE"),
+                "Is_Dunk": is_dunk, "Is_Half_Court": is_half
+            }
+            all_shots.append(row)
+        return all_shots
+    except:
+        return None
+
+def run_updater():
+    """Main logic to update both datasets."""
+    
+    # 1. Load existing data to find where to resume
+    existing_pbp = pd.DataFrame()
+    existing_shots = pd.DataFrame()
+    
+    if os.path.exists("euroleague_pbp_2024_2025.parquet"):
+        existing_pbp = pd.read_parquet("euroleague_pbp_2024_2025.parquet")
+    
+    if os.path.exists("euroleague_shot_chart_extended.parquet"):
+        existing_shots = pd.read_parquet("euroleague_shot_chart_extended.parquet")
+
+    new_pbp_rows = []
+    new_shot_rows = []
+    
+    status_text = st.empty()
+    progress_bar = st.progress(0)
+    
+    total_steps = len(SEASONS_TO_FETCH) * 400 # Approx games
+    step_count = 0
+
+    with st.status("Downloading latest Euroleague data...", expanded=True) as status:
+        
+        for season in SEASONS_TO_FETCH:
+            st.write(f"Checking Season {season}...")
+            
+            # Determine start game
+            start_game = 1
+            if not existing_pbp.empty:
+                season_pbp = existing_pbp[existing_pbp['Season'] == season]
+                if not season_pbp.empty:
+                    start_game = season_pbp['GameCode'].max() + 1
+            
+            current_game = start_game
+            consecutive_errors = 0
+            
+            while True:
+                status_text.text(f"Fetching {season} Game {current_game}...")
+                
+                # Fetch PBP
+                pbp_data = fetch_pbp_game(season, current_game)
+                # Fetch Shots
+                shot_data = fetch_shot_game(season, current_game)
+                
+                if not pbp_data and not shot_data:
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        st.write(f"Finished {season} at Game {current_game-3}")
+                        break
+                else:
+                    consecutive_errors = 0
+                    if pbp_data: new_pbp_rows.extend(pbp_data)
+                    if shot_data: new_shot_rows.extend(shot_data)
+                
+                current_game += 1
+                step_count += 1
+                time.sleep(0.8) # Rate limit
+                if step_count % 10 == 0:
+                    progress_bar.progress(min(step_count / total_steps, 1.0))
+
+        # Save PBP
+        if new_pbp_rows:
+            new_df = pd.DataFrame(new_pbp_rows)
+            final_pbp = pd.concat([existing_pbp, new_df], ignore_index=True).drop_duplicates(subset=['Season', 'GameCode', 'Quarter', 'Time', 'Player', 'PlayType'])
+            final_pbp.to_parquet("euroleague_pbp_2024_2025.parquet")
+            st.success(f"Added {len(new_df)} new plays!")
+        else:
+            st.info("PBP Data is up to date.")
+
+        # Save Shots
+        if new_shot_rows:
+            new_df = pd.DataFrame(new_shot_rows)
+            final_shots = pd.concat([existing_shots, new_df], ignore_index=True).drop_duplicates(subset=['Season', 'GameCode', 'Player', 'Action_Type', 'Minute', 'Coord_X'])
+            final_shots.to_parquet("euroleague_shot_chart_extended.parquet")
+            st.success(f"Added {len(new_df)} new shots!")
+        else:
+            st.info("Shot Data is up to date.")
+            
+        status.update(label="Update Complete!", state="complete", expanded=False)
+        st.rerun()
 
 # --- SIDEBAR SETUP ---
 with st.sidebar:
@@ -33,9 +211,15 @@ with st.sidebar:
         st.warning("Please enter your Gemini API Key to use the AI Analyst.")
     
     st.markdown("---")
-    st.markdown("### Data Sources")
-    pbp_file = st.file_uploader("Upload Play-by-Play Data", type=["csv", "parquet"])
-    shots_file = st.file_uploader("Upload Shot Chart Data", type=["csv", "parquet"])
+    st.markdown("### 📡 Data Manager")
+    st.info("Auto-fetch data from Euroleague API (2024 & 2025).")
+    if st.button("🔄 Update Data Now"):
+        run_updater()
+
+    st.markdown("---")
+    st.markdown("### Manual Upload (Optional)")
+    pbp_file = st.file_uploader("Upload Play-by-Play", type=["csv", "parquet"])
+    shots_file = st.file_uploader("Upload Shot Data", type=["csv", "parquet"])
 
 # --- DATA LOADING FUNCTIONS ---
 @st.cache_data
@@ -193,10 +377,6 @@ def calculate_summary(df, is_player_view=False):
     final_cols = [c for c in display_cols if c in summary.columns]
     return summary[final_cols].sort_values(['Season', 'GameCode'], ascending=[False, False])
 
-# --- HELPER: DRAW COURT ---
-# Deprecated custom function replaced by SportyPy in the main logic below
-# Keeping structure for reference if needed, but main app uses SportyPy now
-
 # --- TAB LAYOUT ---
 tab1, tab2 = st.tabs(["🤖 AI Analyst", "🎯 Shot Charts"])
 
@@ -205,7 +385,7 @@ with tab1:
     st.header("Ask the Data")
     
     if df_pbp is None:
-        st.error("Play-by-Play Data not loaded. Please upload 'euroleague_pbp_2024_2025.csv'.")
+        st.info("⚠️ No data loaded. Click 'Update Data Now' in the sidebar to fetch Euroleague data.")
     else:
         with st.container():
             st.subheader("📊 Data Filters")
@@ -331,13 +511,12 @@ with tab2:
     st.header("Interactive Shot Charts")
     
     if df_shots is None:
-        st.warning("Shot Chart Data not loaded.")
+        st.info("⚠️ No shot data loaded. Click 'Update Data Now' in the sidebar.")
     else:
-        # Filters
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            seasons = df_shots['Season'].unique()
+            seasons = sorted(df_shots['Season'].unique())
             selected_season = st.selectbox("Season", seasons, index=len(seasons)-1, key="sc_season")
         
         df_chart = df_shots[df_shots['Season'] == selected_season]
@@ -373,27 +552,20 @@ with tab2:
         if not SPORTYPY_AVAILABLE:
             st.error("SportyPy library not found. Please add 'sportypy' to requirements.txt.")
         else:
-            # 1. Initialize Court (Vertical orientation for Portrait data)
-            # Use standard matplotlib figure creation first
             fig, ax = plt.subplots(figsize=(12, 12))
             
             court = FIBACourt(rotation=90) 
             court.draw(ax=ax)
             
-            # 2. Convert Units to Meters (cm -> m)
-            # Euroleague data is cm. SportyPy uses meters.
             x_meters = df_chart['Coord_X'] / 100
             y_meters = df_chart['Coord_Y'] / 100
             
-            # 3. Plotting Logic
             misses_mask = df_chart['Shot_Result'] == 'Miss'
             makes_mask = df_chart['Shot_Result'] == 'Make'
             
-            # Plot Misses
             ax.scatter(x_meters[misses_mask], y_meters[misses_mask], 
                        c='red', alpha=0.5, s=40, label='Miss', edgecolors='white', linewidth=0.5, zorder=2)
             
-            # Plot Makes
             ax.scatter(x_meters[makes_mask], y_meters[makes_mask], 
                        c='green', alpha=0.8, s=40, label='Make', edgecolors='white', linewidth=0.5, zorder=3)
             
