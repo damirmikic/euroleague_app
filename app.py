@@ -38,10 +38,8 @@ def fetch_pbp_game(season, game_code):
         if resp.status_code != 200: return None
         data = resp.json()
         
-        # Validation: Check if game data exists
         if not data.get('TeamA'): return None 
 
-        # Parse Quarters (Note: API often types 'ForthQuarter')
         all_plays = []
         quarters = [("Q1", "FirstQuarter"), ("Q2", "SecondQuarter"), 
                     ("Q3", "ThirdQuarter"), ("Q4", "ForthQuarter"), ("OT", "ExtraTime")]
@@ -69,8 +67,8 @@ def fetch_pbp_game(season, game_code):
                         "PlayType": play.get("PLAYTYPE"),
                         "Points_A": play.get("POINTS_A"),
                         "Points_B": play.get("POINTS_B"),
-                        "Dorsal": play.get("DORSAL"),  # Added based on JSON
-                        "Num_An": play.get("NUMBEROFPLAY"), # Added for sorting
+                        "Dorsal": play.get("DORSAL"),
+                        "Num_An": play.get("NUMBEROFPLAY"),
                         "Info": play.get("PLAYINFO")
                     })
                     all_plays.append(row)
@@ -87,30 +85,26 @@ def fetch_shot_game(season, game_code):
         if resp.status_code != 200: return None
         data = resp.json()
         
-        # Validation: Check if Rows exist
         if not data.get('Rows'): return None
 
         all_shots = []
         for shot in data['Rows']:
             action_id = shot.get("ID_ACTION", "")
-            action_desc = shot.get("ACTION", "") # Capture description
+            action_desc = shot.get("ACTION", "")
             
-            # Logic: Make vs Miss
             shot_result = "Unknown"
             if action_id.endswith("M"):
                 shot_result = "Make"
             elif action_id.endswith("A") or action_id.endswith("MISS"):
                 shot_result = "Miss"
             
-            # Coords
             try: 
                 cx, cy = float(shot.get("COORD_X")), float(shot.get("COORD_Y"))
             except: 
                 cx, cy = None, None
 
-            # Enriched Logic
             is_dunk = "Dunk" in action_desc
-            is_half = (cy is not None and cy > 1242) # FIBA half court line logic
+            is_half = (cy is not None and cy > 1242)
 
             row = {
                 "Season": season, 
@@ -136,9 +130,7 @@ def fetch_shot_game(season, game_code):
         return None
 
 def run_updater():
-    """Main logic to update both datasets with robust overlapping."""
-    
-    # 1. Load existing data
+    """Main logic to update both datasets."""
     existing_pbp = pd.DataFrame()
     existing_shots = pd.DataFrame()
     
@@ -153,22 +145,17 @@ def run_updater():
     
     status_text = st.empty()
     progress_bar = st.progress(0)
-    
-    # Estimates for progress bar
-    total_steps = 100 # Arbitrary buffer
+    total_steps = 100
     step_count = 0
 
     with st.status("Downloading latest Euroleague data...", expanded=True) as status:
-        
         for season in SEASONS_TO_FETCH:
             st.write(f"Checking Season {season}...")
             
-            # Determine start game (Robust Overlap Strategy)
             start_game = 1
             if not existing_pbp.empty:
                 season_pbp = existing_pbp[existing_pbp['Season'] == season]
                 if not season_pbp.empty:
-                    # Start from the LAST recorded game code to catch updates/fixes
                     start_game = int(season_pbp['GameCode'].max())
             
             current_game = start_game
@@ -176,12 +163,9 @@ def run_updater():
             
             while True:
                 status_text.text(f"Fetching {season} Game {current_game}...")
-                
-                # Fetch Data
                 pbp_data = fetch_pbp_game(season, current_game)
                 shot_data = fetch_shot_game(season, current_game)
                 
-                # Stop condition: 3 consecutive empty/error responses
                 if not pbp_data and not shot_data:
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
@@ -194,22 +178,17 @@ def run_updater():
                 
                 current_game += 1
                 step_count += 1
-                time.sleep(0.5) # Rate limit
+                time.sleep(0.5)
                 if step_count % 5 == 0:
                     progress_bar.progress(min(step_count / total_steps, 1.0))
 
-        # --- SAVE LOGIC (ATOMIC REPLACEMENT) ---
-        
-        # PBP Update
         if new_pbp_rows:
             new_df = pd.DataFrame(new_pbp_rows)
             if not existing_pbp.empty:
-                # Remove updated games from old data to prevent duplicates
                 new_df['unique_id'] = new_df['Season'] + "_" + new_df['GameCode'].astype(str)
                 existing_pbp['unique_id'] = existing_pbp['Season'] + "_" + existing_pbp['GameCode'].astype(str)
                 updated_ids = new_df['unique_id'].unique()
                 existing_pbp = existing_pbp[~existing_pbp['unique_id'].isin(updated_ids)]
-                
                 new_df = new_df.drop(columns=['unique_id'])
                 existing_pbp = existing_pbp.drop(columns=['unique_id'])
 
@@ -219,7 +198,6 @@ def run_updater():
         else:
             st.info("PBP Data is up to date.")
 
-        # Shot Chart Update
         if new_shot_rows:
             new_df = pd.DataFrame(new_shot_rows)
             if not existing_shots.empty:
@@ -227,7 +205,6 @@ def run_updater():
                 existing_shots['unique_id'] = existing_shots['Season'] + "_" + existing_shots['GameCode'].astype(str)
                 updated_ids = new_df['unique_id'].unique()
                 existing_shots = existing_shots[~existing_shots['unique_id'].isin(updated_ids)]
-                
                 new_df = new_df.drop(columns=['unique_id'])
                 existing_shots = existing_shots.drop(columns=['unique_id'])
 
@@ -246,7 +223,6 @@ with st.sidebar:
     st.title("🏀 Euroleague Analytics")
     st.markdown("---")
     
-    # API Key Input
     api_key = st.text_input("Enter Gemini API Key", type="password")
     if api_key:
         os.environ["GOOGLE_API_KEY"] = api_key
@@ -272,7 +248,6 @@ def load_data(pbp_path, shots_path):
     pbp_df = None
     shots_df = None
     
-    # Helper: Load CSV or Parquet
     def read_file(file_path_or_buffer):
         if hasattr(file_path_or_buffer, 'name'):
             if file_path_or_buffer.name.endswith('.parquet'):
@@ -393,15 +368,22 @@ def calculate_summary(df, is_player_view=False):
 
     summary['FGA'] = summary['P2A'] + summary['P3A']
     summary['POSS'] = (summary['FGA'] + 0.44 * summary['FTA'] + summary['TO'] - summary['OREB']).round(1)
-    summary['2P%'] = (summary['P2M'] / summary['P2A'] * 100).fillna(0).round(1).astype(str) + '%'
-    summary['3P%'] = (summary['P3M'] / summary['P3A'] * 100).fillna(0).round(1).astype(str) + '%'
+    
+    # Rename cols to requested format
+    summary = summary.rename(columns={
+        'P2M': '2PM', 'P2A': '2PA',
+        'P3M': '3PM', 'P3A': '3PA'
+    })
+
+    summary['2P%'] = (summary['2PM'] / summary['2PA'] * 100).fillna(0).round(1).astype(str) + '%'
+    summary['3P%'] = (summary['3PM'] / summary['3PA'] * 100).fillna(0).round(1).astype(str) + '%'
     summary['FT%'] = (summary['FTM'] / summary['FTA'] * 100).fillna(0).round(1).astype(str) + '%'
 
     display_cols = [
         'Season', 'GameCode', 'TeamA', 'TeamB', 'MIN',
         'PTS', 'POSS', '2P%', '3P%', 'FT%', 
         'REB', 'OREB', 'DREB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD',
-        'P2M', 'P2A', 'P3M', 'P3A', 'FTM', 'FTA'
+        '2PM', '2PA', '3PM', '3PA', 'FTM', 'FTA'
     ]
     final_cols = [c for c in display_cols if c in summary.columns]
     return summary[final_cols].sort_values(['Season', 'GameCode'], ascending=[False, False])
@@ -416,123 +398,209 @@ with tab1:
     if df_pbp is None:
         st.info("⚠️ No data loaded. Click 'Update Data Now' in the sidebar to fetch Euroleague data.")
     else:
-        with st.container():
-            st.subheader("📊 Data Filters")
-            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
-            
-            with f_col1:
-                seasons = sorted(df_pbp['Season'].unique())
-                selected_season = st.selectbox("1. Season", ["All"] + list(seasons), key="pbp_season")
-            
-            df_filtered = df_pbp.copy()
-            if selected_season != "All":
-                df_filtered = df_filtered[df_filtered['Season'] == selected_season]
-
-            with f_col2:
-                teams = sorted(df_filtered['TeamCode'].dropna().unique())
-                selected_team = st.selectbox("2. Team", ["All"] + teams, key="pbp_team")
-            
-            if selected_team != "All":
-                df_filtered = df_filtered[df_filtered['TeamCode'] == selected_team]
-
-            with f_col3:
-                players = sorted(df_filtered['Player'].dropna().unique())
-                selected_player = st.selectbox("3. Player", ["All"] + players, key="pbp_player")
-            
-            if selected_player != "All":
-                df_filtered = df_filtered[df_filtered['Player'] == selected_player]
-
-            with f_col4:
-                if not df_filtered.empty:
-                    games_df = df_filtered[['GameCode', 'TeamA', 'TeamB']].drop_duplicates().sort_values('GameCode')
-                    games_df['Label'] = games_df['GameCode'].astype(str) + " - " + games_df['TeamA'] + " vs " + games_df['TeamB']
-                    game_options = ["All"] + list(games_df['Label'])
-                else:
-                    game_options = ["All"]
-                
-                selected_game = st.selectbox("4. Game", game_options, key="pbp_game")
-
-            if selected_game != "All":
-                game_code = int(selected_game.split(' - ')[0])
-                df_filtered = df_filtered[df_filtered['GameCode'] == game_code]
-
-            if not df_filtered.empty:
-                is_player_view = selected_player != "All"
-                summary_df = calculate_summary(df_filtered, is_player_view)
-                
-                st.markdown("#### 📈 Match Summary")
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
-                
-                if len(summary_df) > 1:
-                    st.markdown("#### 📊 Statistical Aggregates (Filtered Matches)")
-                    agg_cols = ['MIN', 'PTS', 'POSS', 'REB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD']
-                    agg_cols = [c for c in agg_cols if c in summary_df.columns]
-                    
-                    desc = summary_df[agg_cols].describe().T
-                    desc = desc[['mean', '50%', 'std', 'min', 'max']]
-                    desc.columns = ['Average', 'Median', 'Std Dev', 'Min', 'Max']
-                    
-                    st.dataframe(desc.style.format("{:.2f}"), use_container_width=True)
-            else:
-                st.warning("No data matches the current filters.")
-
-            with st.expander(f"View Raw Play-by-Play Rows ({len(df_filtered)})", expanded=False):
-                st.dataframe(df_filtered, use_container_width=True)
-
-        st.markdown("---")
-        user_query = st.text_area("Enter your question about this data:", height=100, placeholder="e.g., How many points did he score in the 4th quarter?")
+        # MODE SELECTOR
+        mode = st.radio("Analysis Mode", ["Single Analysis", "Compare Entities"], horizontal=True)
         
-        if st.button("Analyze"):
-            if not api_key:
-                st.error("Please provide a Gemini API Key in the sidebar.")
-            elif df_filtered.empty:
-                st.error("The filtered dataset is empty.")
+        if mode == "Single Analysis":
+            with st.container():
+                st.subheader("📊 Data Filters")
+                f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
+                
+                with f_col1:
+                    seasons = sorted(df_pbp['Season'].unique())
+                    selected_season = st.selectbox("1. Season", ["All"] + list(seasons), key="pbp_season")
+                
+                df_filtered = df_pbp.copy()
+                if selected_season != "All":
+                    df_filtered = df_filtered[df_filtered['Season'] == selected_season]
+
+                # VENUE FILTER
+                with f_col5:
+                    venue = st.selectbox("5. Venue", ["All", "Home", "Away"], key="pbp_venue")
+                
+                if venue == "Home":
+                    # Keep rows where TeamCode matches Home Team Code
+                    df_filtered = df_filtered[df_filtered['TeamCode'] == df_filtered['CodeTeamA']]
+                elif venue == "Away":
+                    # Keep rows where TeamCode matches Away Team Code
+                    df_filtered = df_filtered[df_filtered['TeamCode'] == df_filtered['CodeTeamB']]
+
+                with f_col2:
+                    teams = sorted(df_filtered['TeamCode'].dropna().unique())
+                    selected_team = st.selectbox("2. Team", ["All"] + teams, key="pbp_team")
+                
+                if selected_team != "All":
+                    df_filtered = df_filtered[df_filtered['TeamCode'] == selected_team]
+
+                with f_col3:
+                    players = sorted(df_filtered['Player'].dropna().unique())
+                    selected_player = st.selectbox("3. Player", ["All"] + players, key="pbp_player")
+                
+                if selected_player != "All":
+                    df_filtered = df_filtered[df_filtered['Player'] == selected_player]
+
+                with f_col4:
+                    if not df_filtered.empty:
+                        games_df = df_filtered[['GameCode', 'TeamA', 'TeamB']].drop_duplicates().sort_values('GameCode')
+                        games_df['Label'] = games_df['GameCode'].astype(str) + " - " + games_df['TeamA'] + " vs " + games_df['TeamB']
+                        game_options = ["All"] + list(games_df['Label'])
+                    else:
+                        game_options = ["All"]
+                    
+                    selected_game = st.selectbox("4. Game", game_options, key="pbp_game")
+
+                if selected_game != "All":
+                    game_code = int(selected_game.split(' - ')[0])
+                    df_filtered = df_filtered[df_filtered['GameCode'] == game_code]
+
+                if not df_filtered.empty:
+                    is_player_view = selected_player != "All"
+                    summary_df = calculate_summary(df_filtered, is_player_view)
+                    
+                    st.markdown("#### 📈 Match Summary")
+                    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                    
+                    if len(summary_df) > 1:
+                        st.markdown("#### 📊 Statistical Aggregates (Filtered Matches)")
+                        agg_cols = ['MIN', 'PTS', 'POSS', 'REB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD', '2PM', '2PA', '3PM', '3PA', 'FTM', 'FTA']
+                        agg_cols = [c for c in agg_cols if c in summary_df.columns]
+                        
+                        desc = summary_df[agg_cols].describe().T
+                        desc = desc[['mean', '50%', 'std', 'min', 'max']]
+                        desc.columns = ['Average', 'Median', 'Std Dev', 'Min', 'Max']
+                        
+                        st.dataframe(desc.style.format("{:.2f}"), use_container_width=True)
+                else:
+                    st.warning("No data matches the current filters.")
+
+                with st.expander(f"View Raw Play-by-Play Rows ({len(df_filtered)})", expanded=False):
+                    st.dataframe(df_filtered, use_container_width=True)
+
+            st.markdown("---")
+            user_query = st.text_area("Enter your question about this data:", height=100, placeholder="e.g., How many points did he score in the 4th quarter?")
+            
+            if st.button("Analyze"):
+                if not api_key:
+                    st.error("Please provide a Gemini API Key in the sidebar.")
+                elif df_filtered.empty:
+                    st.error("The filtered dataset is empty.")
+                else:
+                    with st.spinner("Gemini is thinking..."):
+                        try:
+                            buffer_info = df_filtered.head(1).to_markdown(index=False)
+                            columns_info = list(df_filtered.columns)
+                            
+                            prompt = f"""
+                            You are a Python Data Analyst assistant. 
+                            You have a Pandas DataFrame named `df` loaded with Euroleague basketball data.
+                            IMPORTANT: The user has already filtered this DataFrame. It only contains data relevant to their selection.
+                            
+                            Here are the columns: {columns_info}
+                            Here is a sample row:
+                            {buffer_info}
+                            
+                            Write a Python script to answer this question: "{user_query}"
+                            
+                            Rules:
+                            1. Assume `df` is already loaded (it is the filtered dataframe).
+                            2. Store the final answer in a variable named `result`.
+                            3. `result` can be a number, a string, or a pandas DataFrame.
+                            4. Do NOT use `print()`.
+                            5. Return ONLY the Python code, no markdown formatting (no ```python).
+                            6. Handle potential division by zero.
+                            7. Use case-insensitive string comparison for names.
+                            """
+                            
+                            model = genai.GenerativeModel('gemini-2.0-flash-exp')
+                            response = model.generate_content(prompt)
+                            generated_code = response.text.replace("```python", "").replace("```", "").strip()
+                            
+                            local_vars = {"df": df_filtered, "pd": pd}
+                            exec(generated_code, {}, local_vars)
+                            result = local_vars.get("result")
+                            
+                            st.subheader("Result:")
+                            if isinstance(result, pd.DataFrame):
+                                st.dataframe(result, use_container_width=True)
+                            else:
+                                st.info(str(result))
+                                
+                            with st.expander("View Generated Code"):
+                                st.code(generated_code, language='python')
+                                
+                        except Exception as e:
+                            st.error(f"An error occurred: {e}")
+
+        elif mode == "Compare Entities":
+            st.subheader("⚔️ Comparison Mode")
+            
+            comp_type = st.radio("Compare Type", ["Players", "Teams"], horizontal=True)
+            
+            c_col1, c_col2, c_col3 = st.columns(3)
+            
+            with c_col1:
+                seasons = sorted(df_pbp['Season'].unique())
+                sel_season = st.selectbox("Season", ["All"] + list(seasons), key="comp_season")
+            
+            # Base Filter
+            df_c = df_pbp.copy()
+            if sel_season != "All":
+                df_c = df_c[df_c['Season'] == sel_season]
+            
+            if comp_type == "Players":
+                all_opts = sorted(df_c['Player'].dropna().unique())
+                with c_col2:
+                    entity_a = st.selectbox("Player A", all_opts, key="ent_a")
+                with c_col3:
+                    entity_b = st.selectbox("Player B", all_opts, key="ent_b")
             else:
-                with st.spinner("Gemini is thinking..."):
-                    try:
-                        buffer_info = df_filtered.head(1).to_markdown(index=False)
-                        columns_info = list(df_filtered.columns)
+                all_opts = sorted(df_c['TeamCode'].dropna().unique())
+                with c_col2:
+                    entity_a = st.selectbox("Team A", all_opts, key="ent_a")
+                with c_col3:
+                    entity_b = st.selectbox("Team B", all_opts, key="ent_b")
+            
+            if st.button("Compare Now"):
+                if entity_a and entity_b:
+                    # Filter A
+                    if comp_type == "Players":
+                        df_a = df_c[df_c['Player'] == entity_a]
+                        df_b = df_c[df_c['Player'] == entity_b]
+                        is_player = True
+                    else:
+                        df_a = df_c[df_c['TeamCode'] == entity_a]
+                        df_b = df_c[df_c['TeamCode'] == entity_b]
+                        is_player = False
+                    
+                    # Calc Stats
+                    summ_a = calculate_summary(df_a, is_player_view=is_player)
+                    summ_b = calculate_summary(df_b, is_player_view=is_player)
+                    
+                    # Aggregate Averages
+                    agg_cols = ['MIN', 'PTS', 'POSS', 'REB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD', '2PM', '3PM', 'FTM']
+                    
+                    def get_avgs(df_summary, name):
+                        if df_summary.empty: return pd.Series(name=name)
+                        # Mean of numeric cols
+                        res = df_summary[ [c for c in agg_cols if c in df_summary.columns] ].mean()
+                        res.name = name
+                        return res
                         
-                        prompt = f"""
-                        You are a Python Data Analyst assistant. 
-                        You have a Pandas DataFrame named `df` loaded with Euroleague basketball data.
-                        IMPORTANT: The user has already filtered this DataFrame. It only contains data relevant to their selection.
-                        
-                        Here are the columns: {columns_info}
-                        Here is a sample row:
-                        {buffer_info}
-                        
-                        Write a Python script to answer this question: "{user_query}"
-                        
-                        Rules:
-                        1. Assume `df` is already loaded (it is the filtered dataframe).
-                        2. Store the final answer in a variable named `result`.
-                        3. `result` can be a number, a string, or a pandas DataFrame.
-                        4. Do NOT use `print()`.
-                        5. Return ONLY the Python code, no markdown formatting (no ```python).
-                        6. Handle potential division by zero.
-                        7. Use case-insensitive string comparison for names.
-                        """
-                        
-                        model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                        response = model.generate_content(prompt)
-                        generated_code = response.text.replace("```python", "").replace("```", "").strip()
-                        
-                        local_vars = {"df": df_filtered, "pd": pd}
-                        exec(generated_code, {}, local_vars)
-                        result = local_vars.get("result")
-                        
-                        st.subheader("Result:")
-                        if isinstance(result, pd.DataFrame):
-                            st.dataframe(result, use_container_width=True)
-                        else:
-                            st.info(str(result))
-                            
-                        with st.expander("View Generated Code"):
-                            st.code(generated_code, language='python')
-                            
-                    except Exception as e:
-                        st.error(f"An error occurred: {e}")
+                    avg_a = get_avgs(summ_a, entity_a)
+                    avg_b = get_avgs(summ_b, entity_b)
+                    
+                    comp_df = pd.DataFrame([avg_a, avg_b])
+                    st.markdown("### Head-to-Head Averages")
+                    st.dataframe(comp_df.style.format("{:.2f}"), use_container_width=True)
+                    
+                    st.markdown("### Detailed Logs")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption(f"{entity_a} Games")
+                        st.dataframe(summ_a, use_container_width=True)
+                    with c2:
+                        st.caption(f"{entity_b} Games")
+                        st.dataframe(summ_b, use_container_width=True)
 
 # --- TAB 2: SHOT CHARTS ---
 with tab2:
@@ -579,14 +647,13 @@ with tab2:
         if not SPORTYPY_AVAILABLE:
             st.error("SportyPy library not found. Please add 'sportypy' to requirements.txt.")
         else:
-            # FIXED: Create figure/axes explicitly before passing to draw()
-            fig, ax = plt.subplots(figsize=(12, 12))
+            fig, ax = plt.subplots(figsize=(8, 8))
             
             court = FIBACourt(rotation=90) 
             court.draw(ax=ax)
             
             x_meters = df_chart['Coord_X'] / 100
-            y_meters = df_chart['Coord_Y'] / 100
+            y_meters = (df_chart['Coord_Y'] / 100) - 12.425
             
             misses_mask = df_chart['Shot_Result'] == 'Miss'
             makes_mask = df_chart['Shot_Result'] == 'Make'
@@ -597,8 +664,11 @@ with tab2:
             ax.scatter(x_meters[makes_mask], y_meters[makes_mask], 
                        c='green', alpha=0.8, s=40, label='Make', edgecolors='white', linewidth=0.5, zorder=3)
             
+            ax.set_xlim(-8, 8)
+            ax.set_ylim(-15, -1)
+            
             title_str = f"{selected_season} | {selected_team} | {selected_player}"
-            ax.set_title(title_str, fontsize=16, y=1.02)
+            ax.set_title(title_str, fontsize=14, y=1.02)
             ax.legend(loc='upper right')
             
             st.pyplot(fig)
