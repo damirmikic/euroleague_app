@@ -115,9 +115,9 @@ def fetch_shot_game(season, game_code):
         return None
 
 def run_updater():
-    """Main logic to update both datasets."""
+    """Main logic to update both datasets with robust overlapping."""
     
-    # 1. Load existing data to find where to resume
+    # 1. Load existing data
     existing_pbp = pd.DataFrame()
     existing_shots = pd.DataFrame()
     
@@ -133,7 +133,8 @@ def run_updater():
     status_text = st.empty()
     progress_bar = st.progress(0)
     
-    total_steps = len(SEASONS_TO_FETCH) * 400 # Approx games
+    # Estimates for progress bar
+    total_steps = 50 # Arbitrary buffer for new games
     step_count = 0
 
     with st.status("Downloading latest Euroleague data...", expanded=True) as status:
@@ -141,12 +142,14 @@ def run_updater():
         for season in SEASONS_TO_FETCH:
             st.write(f"Checking Season {season}...")
             
-            # Determine start game
+            # Determine start game (Robust Overlap Strategy)
             start_game = 1
             if not existing_pbp.empty:
                 season_pbp = existing_pbp[existing_pbp['Season'] == season]
                 if not season_pbp.empty:
-                    start_game = season_pbp['GameCode'].max() + 1
+                    # Start from the LAST recorded game code. 
+                    # This re-fetches the last game to ensure it's final/complete (handling live games).
+                    start_game = int(season_pbp['GameCode'].max())
             
             current_game = start_game
             consecutive_errors = 0
@@ -159,6 +162,7 @@ def run_updater():
                 # Fetch Shots
                 shot_data = fetch_shot_game(season, current_game)
                 
+                # Stop condition: 3 consecutive empty/error responses
                 if not pbp_data and not shot_data:
                     consecutive_errors += 1
                     if consecutive_errors >= 3:
@@ -172,28 +176,56 @@ def run_updater():
                 current_game += 1
                 step_count += 1
                 time.sleep(0.8) # Rate limit
-                if step_count % 10 == 0:
+                if step_count % 5 == 0:
                     progress_bar.progress(min(step_count / total_steps, 1.0))
 
-        # Save PBP
+        # --- SAVE LOGIC (ATOMIC REPLACEMENT) ---
+        # We replace the entire game's data with the newly fetched version 
+        # to handle corrections or live game updates safely.
+
         if new_pbp_rows:
             new_df = pd.DataFrame(new_pbp_rows)
-            final_pbp = pd.concat([existing_pbp, new_df], ignore_index=True).drop_duplicates(subset=['Season', 'GameCode', 'Quarter', 'Time', 'Player', 'PlayType'])
+            
+            if not existing_pbp.empty:
+                # Remove games that are being updated from the old dataset
+                # Create a unique ID for efficient filtering
+                new_df['unique_id'] = new_df['Season'] + "_" + new_df['GameCode'].astype(str)
+                existing_pbp['unique_id'] = existing_pbp['Season'] + "_" + existing_pbp['GameCode'].astype(str)
+                
+                updated_ids = new_df['unique_id'].unique()
+                existing_pbp = existing_pbp[~existing_pbp['unique_id'].isin(updated_ids)]
+                
+                # Drop helper cols
+                new_df = new_df.drop(columns=['unique_id'])
+                existing_pbp = existing_pbp.drop(columns=['unique_id'])
+
+            final_pbp = pd.concat([existing_pbp, new_df], ignore_index=True)
             final_pbp.to_parquet("euroleague_pbp_2024_2025.parquet")
-            st.success(f"Added {len(new_df)} new plays!")
+            st.success(f"Updated PBP: Processed {len(new_df)} play rows.")
         else:
             st.info("PBP Data is up to date.")
 
-        # Save Shots
         if new_shot_rows:
             new_df = pd.DataFrame(new_shot_rows)
-            final_shots = pd.concat([existing_shots, new_df], ignore_index=True).drop_duplicates(subset=['Season', 'GameCode', 'Player', 'Action_Type', 'Minute', 'Coord_X'])
+            
+            if not existing_shots.empty:
+                new_df['unique_id'] = new_df['Season'] + "_" + new_df['GameCode'].astype(str)
+                existing_shots['unique_id'] = existing_shots['Season'] + "_" + existing_shots['GameCode'].astype(str)
+                
+                updated_ids = new_df['unique_id'].unique()
+                existing_shots = existing_shots[~existing_shots['unique_id'].isin(updated_ids)]
+                
+                new_df = new_df.drop(columns=['unique_id'])
+                existing_shots = existing_shots.drop(columns=['unique_id'])
+
+            final_shots = pd.concat([existing_shots, new_df], ignore_index=True)
             final_shots.to_parquet("euroleague_shot_chart_extended.parquet")
-            st.success(f"Added {len(new_df)} new shots!")
+            st.success(f"Updated Shots: Processed {len(new_df)} shot rows.")
         else:
             st.info("Shot Data is up to date.")
             
         status.update(label="Update Complete!", state="complete", expanded=False)
+        time.sleep(1)
         st.rerun()
 
 # --- SIDEBAR SETUP ---
