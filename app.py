@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import google.generativeai as genai
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle, Arc
 import os
 import requests
 import time
@@ -32,22 +31,26 @@ HEADERS = {
 
 # --- SCRAPING FUNCTIONS ---
 def fetch_pbp_game(season, game_code):
-    """Fetches and parses PBP data for a single game."""
+    """Fetches and parses PBP data for a single game based on specific JSON structure."""
     url = f"{API_BASE_URL}/PlaybyPlay?gamecode={game_code}&seasoncode={season}"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=5)
         if resp.status_code != 200: return None
         data = resp.json()
-        if not data.get('TeamA'): return None # Game doesn't exist yet
+        
+        # Validation: Check if game data exists
+        if not data.get('TeamA'): return None 
 
-        # Parse Quarters
+        # Parse Quarters (Note: API often types 'ForthQuarter')
         all_plays = []
         quarters = [("Q1", "FirstQuarter"), ("Q2", "SecondQuarter"), 
                     ("Q3", "ThirdQuarter"), ("Q4", "ForthQuarter"), ("OT", "ExtraTime")]
         
         base_info = {
-            "Season": season, "GameCode": game_code,
-            "TeamA": data.get('TeamA'), "TeamB": data.get('TeamB'),
+            "Season": season, 
+            "GameCode": game_code,
+            "TeamA": data.get('TeamA'), 
+            "TeamB": data.get('TeamB'),
             "CodeTeamA": data.get('CodeTeamA', '').strip(), 
             "CodeTeamB": data.get('CodeTeamB', '').strip()
         }
@@ -66,11 +69,14 @@ def fetch_pbp_game(season, game_code):
                         "PlayType": play.get("PLAYTYPE"),
                         "Points_A": play.get("POINTS_A"),
                         "Points_B": play.get("POINTS_B"),
+                        "Dorsal": play.get("DORSAL"),  # Added based on JSON
+                        "Num_An": play.get("NUMBEROFPLAY"), # Added for sorting
                         "Info": play.get("PLAYINFO")
                     })
                     all_plays.append(row)
         return all_plays
-    except:
+    except Exception as e:
+        print(f"Error fetching PBP {season} {game_code}: {e}")
         return None
 
 def fetch_shot_game(season, game_code):
@@ -80,38 +86,53 @@ def fetch_shot_game(season, game_code):
         resp = requests.get(url, headers=HEADERS, timeout=5)
         if resp.status_code != 200: return None
         data = resp.json()
+        
+        # Validation: Check if Rows exist
         if not data.get('Rows'): return None
 
         all_shots = []
         for shot in data['Rows']:
             action_id = shot.get("ID_ACTION", "")
+            action_desc = shot.get("ACTION", "") # Capture description
             
-            # Logic
-            shot_result = "Make" if action_id.endswith("M") else "Miss" if (action_id.endswith("A") or action_id.endswith("MISS")) else "Unknown"
-            if "FT" in action_id: continue # Optional: Skip free throws for pure shot chart? Keeping for now.
-
+            # Logic: Make vs Miss
+            shot_result = "Unknown"
+            if action_id.endswith("M"):
+                shot_result = "Make"
+            elif action_id.endswith("A") or action_id.endswith("MISS"):
+                shot_result = "Miss"
+            
             # Coords
-            try: cx, cy = float(shot.get("COORD_X")), float(shot.get("COORD_Y"))
-            except: cx, cy = None, None
+            try: 
+                cx, cy = float(shot.get("COORD_X")), float(shot.get("COORD_Y"))
+            except: 
+                cx, cy = None, None
 
-            is_dunk = "Dunk" in shot.get("ACTION", "")
-            is_half = (cy is not None and cy > 1242)
+            # Enriched Logic
+            is_dunk = "Dunk" in action_desc
+            is_half = (cy is not None and cy > 1242) # FIBA half court line logic
 
             row = {
-                "Season": season, "GameCode": game_code,
+                "Season": season, 
+                "GameCode": game_code,
                 "Team": shot.get("TEAM", "").strip(),
                 "Player": shot.get("PLAYER"),
+                "Player_ID": shot.get("ID_PLAYER", "").strip(),
                 "Action_Type": action_id,
+                "Action": action_desc,
                 "Shot_Result": shot_result,
                 "Points": shot.get("POINTS"),
-                "Coord_X": cx, "Coord_Y": cy,
+                "Coord_X": cx, 
+                "Coord_Y": cy,
                 "Zone": shot.get("ZONE"),
                 "Minute": shot.get("MINUTE"),
-                "Is_Dunk": is_dunk, "Is_Half_Court": is_half
+                "Is_Dunk": is_dunk, 
+                "Is_Half_Court": is_half
             }
             all_shots.append(row)
         return all_shots
-    except:
+    except Exception as e:
+        print(f"Error fetching Shots {season} {game_code}: {e}")
         return None
 
 def run_updater():
@@ -134,7 +155,7 @@ def run_updater():
     progress_bar = st.progress(0)
     
     # Estimates for progress bar
-    total_steps = 50 # Arbitrary buffer for new games
+    total_steps = 100 # Arbitrary buffer
     step_count = 0
 
     with st.status("Downloading latest Euroleague data...", expanded=True) as status:
@@ -147,8 +168,7 @@ def run_updater():
             if not existing_pbp.empty:
                 season_pbp = existing_pbp[existing_pbp['Season'] == season]
                 if not season_pbp.empty:
-                    # Start from the LAST recorded game code. 
-                    # This re-fetches the last game to ensure it's final/complete (handling live games).
+                    # Start from the LAST recorded game code to catch updates/fixes
                     start_game = int(season_pbp['GameCode'].max())
             
             current_game = start_game
@@ -157,9 +177,8 @@ def run_updater():
             while True:
                 status_text.text(f"Fetching {season} Game {current_game}...")
                 
-                # Fetch PBP
+                # Fetch Data
                 pbp_data = fetch_pbp_game(season, current_game)
-                # Fetch Shots
                 shot_data = fetch_shot_game(season, current_game)
                 
                 # Stop condition: 3 consecutive empty/error responses
@@ -175,43 +194,37 @@ def run_updater():
                 
                 current_game += 1
                 step_count += 1
-                time.sleep(0.8) # Rate limit
+                time.sleep(0.5) # Rate limit
                 if step_count % 5 == 0:
                     progress_bar.progress(min(step_count / total_steps, 1.0))
 
         # --- SAVE LOGIC (ATOMIC REPLACEMENT) ---
-        # We replace the entire game's data with the newly fetched version 
-        # to handle corrections or live game updates safely.
-
+        
+        # PBP Update
         if new_pbp_rows:
             new_df = pd.DataFrame(new_pbp_rows)
-            
             if not existing_pbp.empty:
-                # Remove games that are being updated from the old dataset
-                # Create a unique ID for efficient filtering
+                # Remove updated games from old data to prevent duplicates
                 new_df['unique_id'] = new_df['Season'] + "_" + new_df['GameCode'].astype(str)
                 existing_pbp['unique_id'] = existing_pbp['Season'] + "_" + existing_pbp['GameCode'].astype(str)
-                
                 updated_ids = new_df['unique_id'].unique()
                 existing_pbp = existing_pbp[~existing_pbp['unique_id'].isin(updated_ids)]
                 
-                # Drop helper cols
                 new_df = new_df.drop(columns=['unique_id'])
                 existing_pbp = existing_pbp.drop(columns=['unique_id'])
 
             final_pbp = pd.concat([existing_pbp, new_df], ignore_index=True)
             final_pbp.to_parquet("euroleague_pbp_2024_2025.parquet")
-            st.success(f"Updated PBP: Processed {len(new_df)} play rows.")
+            st.success(f"Updated PBP: {len(new_df)} new/updated plays.")
         else:
             st.info("PBP Data is up to date.")
 
+        # Shot Chart Update
         if new_shot_rows:
             new_df = pd.DataFrame(new_shot_rows)
-            
             if not existing_shots.empty:
                 new_df['unique_id'] = new_df['Season'] + "_" + new_df['GameCode'].astype(str)
                 existing_shots['unique_id'] = existing_shots['Season'] + "_" + existing_shots['GameCode'].astype(str)
-                
                 updated_ids = new_df['unique_id'].unique()
                 existing_shots = existing_shots[~existing_shots['unique_id'].isin(updated_ids)]
                 
@@ -220,7 +233,7 @@ def run_updater():
 
             final_shots = pd.concat([existing_shots, new_df], ignore_index=True)
             final_shots.to_parquet("euroleague_shot_chart_extended.parquet")
-            st.success(f"Updated Shots: Processed {len(new_df)} shot rows.")
+            st.success(f"Updated Shots: {len(new_df)} new/updated shots.")
         else:
             st.info("Shot Data is up to date.")
             
@@ -265,12 +278,10 @@ def load_data(pbp_path, shots_path):
             if file_path_or_buffer.name.endswith('.parquet'):
                 return pd.read_parquet(file_path_or_buffer)
             return pd.read_csv(file_path_or_buffer)
-        
         if isinstance(file_path_or_buffer, str):
             if file_path_or_buffer.endswith('.parquet'):
                 return pd.read_parquet(file_path_or_buffer)
             return pd.read_csv(file_path_or_buffer)
-            
         return None
 
     if pbp_path:
@@ -293,7 +304,6 @@ df_pbp, df_shots = load_data(pbp_file, shots_file)
 
 # --- HELPER: TIME TO SECONDS ---
 def time_to_seconds(t_str):
-    """Converts MM:SS string to seconds."""
     if pd.isna(t_str): return 0
     try:
         m, s = map(int, str(t_str).split(':'))
@@ -303,21 +313,15 @@ def time_to_seconds(t_str):
 
 # --- HELPER: CALCULATE MINUTES ---
 def calculate_minutes_per_game(df):
-    """
-    Calculates minutes played per game/season based on IN/OUT markers.
-    Returns a Series indexed by (Season, GameCode, TeamA, TeamB).
-    """
     def process_game(group):
         total_seconds = 0
         for quarter, q_data in group.groupby('Quarter'):
             q_duration = 300 if quarter in ['OT', 'E1', 'E2'] else 600
-            
             q_data = q_data.copy()
             q_data['Seconds_Left'] = q_data['Time'].apply(time_to_seconds)
             q_data = q_data.sort_values('Seconds_Left', ascending=False)
             
             subs = q_data[q_data['PlayType'].isin(['IN', 'OUT'])]
-            
             is_on_court = False
             last_switch = q_duration
             
@@ -344,17 +348,13 @@ def calculate_minutes_per_game(df):
                     if not is_on_court:
                         last_switch = t
                         is_on_court = True
-            
             if is_on_court:
                 total_seconds += last_switch
-                
         return round(total_seconds / 60.0, 2)
-
     return df.groupby(['Season', 'GameCode', 'TeamA', 'TeamB']).apply(process_game)
 
 # --- HELPER: CALCULATE SUMMARY STATS ---
 def calculate_summary(df, is_player_view=False):
-    """Aggregates Play-by-Play data into a box score summary."""
     if df.empty:
         return pd.DataFrame()
 
@@ -365,7 +365,6 @@ def calculate_summary(df, is_player_view=False):
     stats.loc[stats['PlayType'] == '3FGM', 'Points_Made'] = 3
 
     group_cols = ['Season', 'GameCode', 'TeamA', 'TeamB']
-    
     summary = stats.groupby(group_cols).agg(
         PTS=('Points_Made', 'sum'),
         P2M=('PlayType', lambda x: (x == '2FGM').sum()),
@@ -394,7 +393,6 @@ def calculate_summary(df, is_player_view=False):
 
     summary['FGA'] = summary['P2A'] + summary['P3A']
     summary['POSS'] = (summary['FGA'] + 0.44 * summary['FTA'] + summary['TO'] - summary['OREB']).round(1)
-
     summary['2P%'] = (summary['P2M'] / summary['P2A'] * 100).fillna(0).round(1).astype(str) + '%'
     summary['3P%'] = (summary['P3M'] / summary['P3A'] * 100).fillna(0).round(1).astype(str) + '%'
     summary['FT%'] = (summary['FTM'] / summary['FTA'] * 100).fillna(0).round(1).astype(str) + '%'
@@ -405,7 +403,6 @@ def calculate_summary(df, is_player_view=False):
         'REB', 'OREB', 'DREB', 'AST', 'STL', 'BLK', 'TO', 'PF', 'FD',
         'P2M', 'P2A', 'P3M', 'P3A', 'FTM', 'FTA'
     ]
-    
     final_cols = [c for c in display_cols if c in summary.columns]
     return summary[final_cols].sort_values(['Season', 'GameCode'], ascending=[False, False])
 
@@ -476,7 +473,6 @@ with tab1:
                     desc.columns = ['Average', 'Median', 'Std Dev', 'Min', 'Max']
                     
                     st.dataframe(desc.style.format("{:.2f}"), use_container_width=True)
-                    
             else:
                 st.warning("No data matches the current filters.")
 
@@ -580,10 +576,10 @@ with tab2:
         
         st.metric(label="Field Goal %", value=f"{percentage:.1f}%", delta=f"{made_shots}/{total_shots}")
 
-        # --- DRAW COURT USING SPORTYPY ---
         if not SPORTYPY_AVAILABLE:
             st.error("SportyPy library not found. Please add 'sportypy' to requirements.txt.")
         else:
+            # FIXED: Create figure/axes explicitly before passing to draw()
             fig, ax = plt.subplots(figsize=(12, 12))
             
             court = FIBACourt(rotation=90) 
